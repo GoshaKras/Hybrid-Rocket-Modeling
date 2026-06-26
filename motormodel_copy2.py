@@ -109,7 +109,7 @@ df_cdinput=pd.read_csv(inputcdcsv)
 #General Inputs
 
 USE_VERTICAL_INPUTS = True # Set to True to load from vertical CSV, False to use hardcoded values
-VERTICAL_INPUTS_FILE = 'inputs_vertical_sample1.csv'
+VERTICAL_INPUTS_FILE = 'inputs_vertical_sample.csv'
 Exportinputs=False  # Set to True to export inputs to vertical CSV
 
 
@@ -647,7 +647,7 @@ try:
         FuelGrainMath.gammas(CEAforRocket,expansionratio=NozzleMath.ExpansionRatio)
         FuelGrainMath.throatPressure(CEAforRocket)
         FuelGrainMath.densitys(CEAforRocket)
-        FuelGrainMath.complexregression(CEAforRocket,Fuel_Density,FuelGrainLength)
+        #FuelGrainMath.complexregression(CEAforRocket,Fuel_Density,FuelGrainLength)
         if Is_fuelGrain_Helix==True:
             FuelGrainMath.helixmath(CEAforRocket,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix,revPitch,PitchFor_Helix,AmountofSmallCircles,Is_FuelGrain_PixelMethod,FuelGrainDiameter,expansionratio=NozzleMath.ExpansionRatio,OusideSmallCircle_raduis=OutsideSmallCircle_raduis,helical_archsegment=helicalarchsegmant)
         if Is_FuelGrain_GoshaStar==True:
