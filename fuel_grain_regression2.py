@@ -22,7 +22,6 @@ np.set_printoptions(threshold=10000)
 
 class FuelGrainRegressionSimulator:
     """Simulates fuel grain regression using Fast Marching Method"""
-    
     def __init__(self, obj_file_path, outer_diameter_inches=5.0, resolution=500, cross_section_axis=2, cross_section_pos=None):
         """
         Initialize the simulator.

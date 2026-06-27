@@ -1,5 +1,5 @@
 name,value,unit
-Want_ThrustCurve,TRUE,bool
+Want_ThrustCurve,1,bool
 Timestep,0.01,s
 outsidePressure_PA,101325,Pa
 UploadFromExel,0,bool
