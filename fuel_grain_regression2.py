@@ -1802,7 +1802,9 @@ class FuelGrainRegressionSimulator:
 def main():
     """Main execution function"""
     # Configuration
-    obj_file = r'C:\Users\gosha\Desktop\MotorModelP2\cads\goddard.obj'
+    current_dir = Path(__file__).resolve().parent
+    obj_file = current_dir / "goddard.obj"
+    # obj_file = r'C:\Users\gosha\Desktop\MotorModelP2\cads\goddard.obj'
     outer_diameter_inches = 6.74  # Will be overridden by actual geometry
     regression_rate = 3  # mm/sec
     time_seconds = 40  # seconds
