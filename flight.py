@@ -13,8 +13,8 @@ import inputs_io
 from rocketcea.cea_obj import CEA_Obj, add_new_fuel, add_new_oxidizer, add_new_propellant
 
 class Flight:
-    def __init__(self,wetmass,drymass,rocketareaM,startingoutsidetempC,PressureOutsidePa,TempchangePerMeter,realativehumidity,dragcoIfnotcdchart,df_cdinput,drouge_cd,drouge_area,infaltionint,infaltiontime,main_cd,main_area,maindelpyalt,Timestep,RealTime):
-       
+    def __init__(self,wetmass,drymass,rocketareaM,startingoutsidetempC,PressureOutsidePa,TempchangePerMeter,realativehumidity,dragcoIfnotcdchart,
+                 df_cdinput,drouge_cd,drouge_area,infaltionint,infaltiontime,main_cd,main_area,maindelpyalt,Timestep,RealTime):
         
         self.status = 'burn'
         

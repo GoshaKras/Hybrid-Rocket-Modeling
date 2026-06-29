@@ -1,6 +1,6 @@
 name,value,unit
-Want_ThrustCurve,TRUE,bool
-Timestep,0.01,s
+Want_ThrustCurve,0,bool
+Timestep,.01,s
 outsidePressure_PA,101325,Pa
 UploadFromExel,0,bool
 Oxtanktemp,298,K
@@ -45,7 +45,7 @@ revPitch,2.13,unitless
 helixrundiameter,0.041146,m
 WhatFuel,ABS,str
 TimeWhenBoostSops,4.75,s
-Is_fuelGrain_Helix,1,bool
+Is_fuelGrain_Helix,0,bool
 Is_FuelGrain_GoshaStar,0,bool
 Is_FuelGrain_PixelMethod,0,bool
 Is_fuelgrain_Transient,1,bool

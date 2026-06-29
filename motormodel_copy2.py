@@ -21,11 +21,20 @@ from flight import Flight
 import cProfile
 import pstats
 import io
+from inputgui import *
 #Custom imports
 
 # Usage:
 # python motormodel.py export_inputs inputs_sample.csv
 # python motormodel.py import_inputs inputs_sample.csv
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+
+    window = InputEditor()
+    window.show()
+    app.exec()  # Blocks here until the user closes the input window
+
+
 
 if True:#cea
     #CEA OUTPUT
@@ -105,140 +114,25 @@ script_start_time = time_module.time()
 
 #shit for output csv
 Output = "output_thrust.csv"
-thrust_time_output = "time_thrust.csv"
 #input files
 inputcdcsv="cd.csv"
 df_cdinput=pd.read_csv(inputcdcsv)
 #General Inputs
 
-USE_VERTICAL_INPUTS = True # Set to True to load from vertical CSV, False to use hardcoded values
-VERTICAL_INPUTS_FILE = 'inputs_vertical_sample1.csv'
+# INPUT_FILE = input("Name of input file(include the .csv): ")
+
+Is_CSV = True # Set to True to load from vertical CSV, False to use hardcoded values, should always be true
+VERTICAL_INPUTS_FILE = 'inputs_vertical_sample.csv'
 Exportinputs = False  # Set to True to export inputs to vertical CSV
 
 
-if USE_VERTICAL_INPUTS:
+if Is_CSV:
     inputs_io.import_inputs_vertical(VERTICAL_INPUTS_FILE, globals())
     CEAforRocket = CEA_Obj(oxName=WhatOxidizer, fuelName=WhatFuel)
     print(f"Loaded inputs from {VERTICAL_INPUTS_FILE}")
-# else:
-#     Want_ThrustCurve=True
-#     Timestep=0.01
-#     outsidePressure_PA=101325
-#     UploadFromExel=False
-#     # if UploadFromExel==False:
-#     #     # Ox tank inputs
-#     #     Oxtanktemp= 295 #kelvin
-#     #     MetalOxtanktemp=295 #kelvin
-#     #     calculate_volume_YN=True
-#     #     volumeinput= 0.06 #m^3
-#     #     oxtanklength=2.895
-#     #     oxtankOD=0.168275 #m
-#     #     oxtankID=0.161 #m
-#     #     oxtankspecheat= 896 #J/kgK
-#     #     oxtankmass=20 #kg
-#     #     oxtankLstart=oxtankID # lstar just the diameter
-#     #     Ullage=0.1 #%
-#     #     OxamountwhenfizzstartsConstant=0.05
-#     #     Fizzstart2=1
-#     #     FizzCurveConstant=1
-#     #     NitrousGamma=1.27
-#     #     vapour_temp_damping=1 # 0-1: higher = slower cooling (0.95 = lose 5% per iteration, 0.9 = lose 10%)
-#     #     #Fuel Grain inputs
-#     #     Is_FuelGrain_just_a_circle=False
-#     #     FuelGrainRadius=0.0381 #meters
-#     #     Regression_Aco= 0.127
-#     #     Regression_Nco= 0.65
-#     #     Fuel_Density=920 #kg/m^3
-#     #     FuelGrainLength=0.8 #m
-#     #     IntailGoalOf_OF_ratio=6.3
-#     #     InitailGoalof_Chamberpressure_Psi= 400 #psi
-#     #     OuterGrainRaduis=0.06985 #m #idk if used
-#     #     OuterDiameter_inches=10.5 #inches # for pixel method
-#     #     RawSillyMotorEffceincy=0.8235
-#     #     Ncomb_ForChamberPressure=0.85
-#     #     NozzleCD_ForChamberPressure=0.97
-#     #     start_chamber_pressure_pa=101325
-#     #     start_chamber_temperature_k=300
-#     #     regfluxstuff= 10 #based of units
-#     #     preccandpostvolume=0.00616
-#     #     start_gas_gpermole= 28.97 #g/mole
-#     #     #Keep CenterCircleFuelGrain_Raduis at zero if yu want this fully ignored
-#     #     CenterCircleFuelGrain_Raduis=0.0375 #m
-#     #     AmountofSmallCircles=5
-#     #     OutsideSmallCircle_raduis= 0.012 #m
-#     #     revPitch=1.05 # how many times it revolves in fuel grain
-#     #     helixrundiameter=0.0375
-#     #     WhatFuel='HTPB'  # your options: 'Sorbitol', 'PMMA', 'PBAN', 'Paraffin', 'ABS', 'HTPB'
-#     #     WhatOxidizer='N2O'
-#     #     TimeWhenBoostSops=4.75 #seconds
-#     #     Is_fuelGrain_Helix=True
-#     #     Is_FuelGrain_GoshaStar=False
-#     #     Is_FuelGrain_PixelMethod=True
-#     #     Is_fuelgrain_Transient=True
-#     #     Is_start_mass_gas_input=False
-#     #     Is_vapourPhase_constant_temp=False
-#     #     Is_sim_flight=True
-#     #     Is_2phase_flow_injector_model=True
-#     #     Is_easy_nozzle_regression=True
-#     #     Is_fizz_when_equal=False #if false set value
-#     #     Is_print_pixelstuff=False
-#     #
-#     #
-#     #     #Injector Inputs
-#     #     InjectorArea=0.00010716494696 #m^2
-#     #     DischargeCo_SPI=0.65
-#     #     DischargeCo_HEM=0.9
-#     #     PrefferedMassFlowrate_SPI=3.9 #kg/sec
-#     #     HowmuchInj_Help=1.51
-#     #     HydrolicDiameter=9.53/1000 #m
-#     #     #Vent inputs....Probably wont be used for a while
-#     #     VentDiameter=0.001 #m
-#     #     VentCD=0.9
-#     #     #Nozzle Inputs
-#     #     NozzleThoatArea=0.002361911 #m
-#     #     NozzleExitArea= 0.010510502 #m
-#     #     TakeExpansionAsInput=True
-#     #     NozzleExpansionAs_Input=4
-#     #
-#     #     #Simple Nozzle AblationRate
-#     #     ThoartAblationRate=0 #m/sec
-#     #     ExitAblationRate=(0.183/1000) #m/sec
-#     #     max_at_what_pressure_psi= 400 #psi
-#     #     max_at_what_OF_ratio= 6.3
-#     #
-#     #     # flight inputs-
-#     #     wetmass=84.0 #kg
-#     #     drymass=33.75 #kg
-#     #     burntimecutoff=20 #sec
-#     #     dragcofrominputcsv=True
-#     #     dragcoIfnotcdchart=0.7
-#     #     drouge_area=0.67 #meters
-#     #     drouge_cd=0.97 #meters
-#     #     main_area=1 #meters
-#     #     main_cd=1.6
-#     #     infaltiontime=2 #sec
-#     #     rocketdiameterIn=6.625 #in
-#     #     startingoutsidetempC=23.0 #C
-#     #     TempchangePerMeter=0.0065 #C/m
-#     #     pressureOutsideIn= 29.97 #in#
-#     #     realativehumidity=27.44 #%
-#     #     maindelpyalt=500.0 #meters
-#     #
-#     #     #general stuff
-#     #     Timestep=0.01
-#     #     outsidePressure_PA=101325
-#     #
-#     #     max_at_what_pressure_psi= 400 #psi
-#     #     max_at_what_OF_ratio= 6.3
-#     #     regfluxstuff= 10
-#     #     Is_fizz_when_equal=False
-#     #     preccandpostvolume=0.00616
-#     #     Fizzstart2=1
 
 
 #stuff that is calculated from inputs
-
-
 if True:
     oxtanksurfaceareainput = (oxtankID*3.14*oxtanklength) + (2*3.14*((oxtankID/2)**2)) #m^2
     Calced_OxtankVolume = 3.14 * oxtankID * oxtankID * 0.25 * oxtanklength
@@ -344,7 +238,7 @@ class RocketOutputs:
         self.nozzle.print_outputs()
 
 
-InputyOutputs=RocketOutputs() # holds non cyclical putputs
+InputyOutputs = RocketOutputs() # holds non cyclical putputs
 
 #Outputs from inputs and like shit that could help inputs... INPUTY OUTPUTS !!!
 if True:
@@ -536,6 +430,7 @@ NozzleMath.stuffnotprint(max_at_what_pressure_psi,IntailGoalOf_OF_ratio,NozzleTh
 NozzleMath.thrustreal=0
 
 if Is_FuelGrain_GoshaStar == True:
+    print("FUEALGRAIN IS GOSHA STAR")
     FuelGrainMath.starshape(CenterCircleFuelGrain_Raduis,OutsideSmallCircle_raduis,AmountofSmallCircles,whatRaduisWouldNeedtobeOfNormalCircleToMatch,OneArchlengthestimate,TotalComplexArea,ComplexPerimeter,Fuelgrainlength=FuelGrainLength)
 if Is_sim_flight==True: #fix later
     flighmath=Flight(wetmass,drymass,rocketareaM,startingoutsidetempC,PressureOutsidePa,TempchangePerMeter,realativehumidity,dragcoIfnotcdchart,df_cdinput,drouge_cd,drouge_area,infaltionint,infaltiontime,main_cd,main_area,maindelpyalt,Timestep,RealTime)
@@ -759,6 +654,7 @@ if thrust_col and time_col:
         
         # Motor designation (based on impulse: NFPA designation)
         # Standard designations: A (1.26-5.1), B (5.1-10.16), C (10.16-20.32), etc.
+
         if total_impulse < 5.1:
             designation = 'A'
         elif total_impulse < 10.16:
