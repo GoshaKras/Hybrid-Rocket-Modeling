@@ -337,6 +337,10 @@ class FuelGrain():
         if self.Is_pixel==True:
             self.area_grain=self.pixelAREA
             self.insurfacearea=self.P_perimeter*FuelGrainLength
+        if self.Is_pixel==False and Is_FuelGrain_GoshaStar==False:
+            # Hydraulic diameter of a circular port equals the port diameter.
+            # Needed by complexregression(); otherwise unset in the simple-circle case.
+            self.hydrolicdiamter=self.diameter_grain
         if Is_fuelGrain_Helix==True:
             self.insurfacearea=self.insurfacearea+self.surfaceareaadd
             self.addtoarea_bcHelix=((self.surfaceareaadd/(FuelGrainLength*6.28))**2) * 3.14 #not used

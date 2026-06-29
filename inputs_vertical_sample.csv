@@ -45,7 +45,7 @@ revPitch,2.13,unitless
 helixrundiameter,0.041146,m
 WhatFuel,ABS,str
 TimeWhenBoostSops,4.75,s
-Is_fuelGrain_Helix,1,bool
+Is_fuelGrain_Helix,0,bool
 Is_FuelGrain_GoshaStar,0,bool
 Is_FuelGrain_PixelMethod,0,bool
 Is_fuelgrain_Transient,1,bool
