@@ -20,13 +20,6 @@ from inputgui import *
 import sqlite3
 #Custom imports
 
-# --------------------------------------------------------------------------------------------
-# DATA BASE STUFF
-
-connection = sqlite3.connect('test.db') # creates if does not exist
-cursor = connection.cursor()
-
-# --------------------------------------------------------------------------------------------
 # Usage:
 # python motormodel.py export_inputs inputs_sample.csv
 # python motormodel.py import_inputs inputs_sample.csv
