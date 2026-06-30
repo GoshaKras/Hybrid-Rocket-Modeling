@@ -126,10 +126,10 @@ VERTICAL_INPUTS_FILE = 'inputs_vertical_sample.csv'
 Exportinputs = False  # Set to True to export inputs to vertical CSV
 
 
-if Is_CSV:
-    inputs_io.import_inputs_vertical(VERTICAL_INPUTS_FILE, globals())
-    CEAforRocket = CEA_Obj(oxName=WhatOxidizer, fuelName=WhatFuel)
-    print(f"Loaded inputs from {VERTICAL_INPUTS_FILE}")
+
+inputs_io.import_inputs_vertical(VERTICAL_INPUTS_FILE, globals())
+CEAforRocket = CEA_Obj(oxName=WhatOxidizer, fuelName=WhatFuel)
+print(f"Loaded inputs from {VERTICAL_INPUTS_FILE}")
 
 
 #stuff that is calculated from inputs

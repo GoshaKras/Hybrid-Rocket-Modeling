@@ -435,7 +435,7 @@ class FuelGrainRegressionSimulator:
             ax.set_title(f'OBJ Cross-Section at {axis_names[self.cross_section_axis]}={cross_pos:.3f}', fontsize=12)
             
             plt.tight_layout()
-            plt.show()
+            plt.draw()  # don't block/show mid-run; final plt.show() in motormodel renders all figures
             
         except Exception as e:
             print(f"Error plotting OBJ geometry: {e}")
@@ -494,7 +494,7 @@ class FuelGrainRegressionSimulator:
         ax.legend(loc='upper right')
         
         plt.tight_layout()
-        plt.show()
+        plt.draw()  # don't block/show mid-run; final plt.show() in motormodel renders all figures
     
     def calculate_inscribed_circle_boundary_overlap(self, regressed_grid, max_circle_center, max_circle_radius, pixel_width, X, Y):
         """
@@ -838,7 +838,7 @@ class FuelGrainRegressionSimulator:
         update(0)
         
         plt.tight_layout()
-        plt.show()
+        plt.draw()  # don't block/show mid-run; final plt.show() in motormodel renders all figures
     
     def plot_area_vs_regression(self, max_regression_distance=None):
         """
@@ -942,7 +942,7 @@ class FuelGrainRegressionSimulator:
                family='monospace')
         
         plt.tight_layout()
-        plt.show()
+        plt.draw()  # don't block/show mid-run; final plt.show() in motormodel renders all figures
         
         # Print summary
         print(f"\nArea vs Regression Summary:")
@@ -1083,7 +1083,7 @@ class FuelGrainRegressionSimulator:
                family='monospace')
         
         plt.tight_layout()
-        plt.show()
+        plt.draw()  # don't block/show mid-run; final plt.show() in motormodel renders all figures
         
         # Print summary
         print(f"\nPerimeter vs Regression Summary:")
@@ -1218,7 +1218,7 @@ class FuelGrainRegressionSimulator:
                family='monospace')
         
         plt.tight_layout()
-        plt.show()
+        plt.draw()  # don't block/show mid-run; final plt.show() in motormodel renders all figures
         
         # Print summary
         print(f"\nMax Inscribed Circle vs Regression Summary:")
@@ -1363,7 +1363,7 @@ class FuelGrainRegressionSimulator:
                family='monospace')
         
         plt.tight_layout()
-        plt.show()
+        plt.draw()  # don't block/show mid-run; final plt.show() in motormodel renders all figures
         
         # Print summary
         print(f"\nMin Enclosing Circle vs Regression Summary:")
@@ -1541,7 +1541,7 @@ class FuelGrainRegressionSimulator:
                family='monospace')
         
         plt.tight_layout()
-        plt.show()
+        plt.draw()  # don't block/show mid-run; final plt.show() in motormodel renders all figures
         
         # Print summary
         print(f"\nCircle Boundary Overlap vs Regression Summary:")
@@ -1785,7 +1785,7 @@ class FuelGrainRegressionSimulator:
                family='monospace')
         
         plt.tight_layout()
-        plt.show()
+        plt.draw()  # don't block/show mid-run; final plt.show() in motormodel renders all figures
         
         # Print summary
         print(f"\nLargest Arm Contact Length vs Regression Summary:")
