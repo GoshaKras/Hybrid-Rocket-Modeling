@@ -18,11 +18,15 @@ import pstats
 import io
 from inputgui import *
 import sqlite3
+from datetime import datetime
 #Custom imports
 
 # Usage:
 # python motormodel.py export_inputs inputs_sample.csv
 # python motormodel.py import_inputs inputs_sample.csv
+
+conn = sqlite3.connect('motor_database.db')
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
@@ -110,6 +114,10 @@ script_start_time = time_module.time()
 
 #shit for output csv
 Output = "output_thrust.csv"
+
+run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+run_name = f"run_{run_timestamp}" # generates a unique name
+
 #input files
 inputcdcsv="cd.csv"
 df_cdinput=pd.read_csv(inputcdcsv)
@@ -123,7 +131,9 @@ Exportinputs = False  # Set to True to export inputs to vertical CSV
 
 
 
-inputs_io.import_inputs_vertical(VERTICAL_INPUTS_FILE, globals())
+imports_dataframe = inputs_io.import_inputs_vertical(VERTICAL_INPUTS_FILE, globals())
+imports_dataframe.to_sql('inputs', conn, if_exists='replace', index=False)
+
 CEAforRocket = CEA_Obj(oxName=WhatOxidizer, fuelName=WhatFuel)
 print(f"Loaded inputs from {VERTICAL_INPUTS_FILE}")
 
@@ -350,7 +360,7 @@ if Exportinputs==True:
 
     
 
-OxtankMath=Oxtank(RealTime,Oxtanktemp,NitrousQuality,StartMass_Gas,StartMass_Liquid,StartMass_TotalOx,Timestep,MetalOxtanktemp)
+OxtankMath = Oxtank(RealTime,Oxtanktemp,NitrousQuality,StartMass_Gas,StartMass_Liquid,StartMass_TotalOx,Timestep,MetalOxtanktemp)
 OxtankMath.StuffNoPrint(OxtankVolume, Timestep, oxtankLstart,hydroD=HydrolicDiameter,isventopen=isventopen)
 
 FuelGrainMath=FuelGrain(FuelGrainDiameter,fuelGrain_AreaReal,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,HowmuchInj_Help,Is_fuelGrain_Helix,helixrundiameter,Is_fuelgrain_Transient,Is_start_mass_gas_input,StartMass_Gas,Is_FuelGrain_GoshaStar,OneArchlengthestimate,preccandpostvolume,start_gas_gpermole,RealTime,Is_FuelGrain_PixelMethod)
@@ -471,6 +481,7 @@ if Is_sim_flight:
     flighmath.finalize_output()
 
 if Is_sim_flight:
+    # not actually a csv but rather a df
     combined_csv = pd.concat([OxtankMath.outputcsv.reset_index(drop=True),
                             FuelGrainMath.outputcsv.reset_index(drop=True),
                             NozzleMath.outputcsv.reset_index(drop=True),
@@ -480,12 +491,33 @@ else:
                             FuelGrainMath.outputcsv.reset_index(drop=True),
                             NozzleMath.outputcsv.reset_index(drop=True)], axis=1)
 
+
 # thrust_time_df = pd.concat([flighmath.outputcsv.reset_index(drop=True)], axis=1)
 
 # writting to the csv
 # thrust_time_df.to_csv(thrust_time_output, index=False)
 combined_csv.to_csv(Output, index=False)
+combined_csv = combined_csv.loc[:, ~combined_csv.columns.duplicated()]
 
+# # -----------------------------------------
+# OxtankMath.outputcsv # this is a pandas dataframe containing all the outputs for ox tank
+# FuelGrainMath.outputcsv
+# NozzleMath.outputcsv
+# flighmath.outputcsv
+# imports_dataframe # datafrom holding all user inputs from csv
+# -----------------------------------------
+
+# p = MotorDatabase()
+
+try:
+    combined_csv.to_sql('runs', conn, if_exists='replace', index=False)
+    # OxtankMath.outputcsv.to_sql('runs', conn, if_exists='replace', index=False)
+    # FuelGrainMath.outputcsv.to_sql('runs', conn, if_exists='replace', index=False)
+    # NozzleMath.outputcsv.to_sql('runs', conn, if_exists='replace', index=False)
+    # flighmath.outputcsv.to_sql('runs', conn, if_exists='replace', index=False)
+    print(f"✓ Results saved to database: motor_runs.db")
+except Exception as e:
+    print(f"⚠ Warning: Failed to save to database: {e}")
 
 
 # Stop profiling and print results

@@ -660,9 +660,7 @@ class Oxtank():
                # self.Z_factor_calc = p / (rho_calc * R_specific * t)
             #except:
              #   self.Z_factor_calc = 0.0
-    
-    def printshit(self):
-            print("hello")
+
     def Calc_CD(self,chamberpressure_PA):
         
         if self.status=="vapour":

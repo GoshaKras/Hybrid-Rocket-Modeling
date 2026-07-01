@@ -79,6 +79,7 @@ def import_inputs(filename, namespace):
             except Exception:
                 pass
             namespace[var] = val
+
     print(f"Imported inputs from {filename}")
 
 def import_inputs_vertical(filename, namespace):
@@ -100,7 +101,9 @@ def import_inputs_vertical(filename, namespace):
         except Exception:
             pass
         namespace[var] = val
+
     print(f"Imported vertical inputs from {filename}")
+    return df
 
 def export_inputs_vertical(filename, namespace):
     """Export input variables to a vertical CSV file (name, value, unit)."""
