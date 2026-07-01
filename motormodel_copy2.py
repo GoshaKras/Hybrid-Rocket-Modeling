@@ -109,7 +109,7 @@ df_cdinput=pd.read_csv(inputcdcsv)
 #General Inputs
 
 USE_VERTICAL_INPUTS = True # Set to True to load from vertical CSV, False to use hardcoded values
-VERTICAL_INPUTS_FILE = 'inputs_vertical_sample.csv'
+VERTICAL_INPUTS_FILE = 'inputs_vertical_sample1.csv'
 Exportinputs=False  # Set to True to export inputs to vertical CSV
 
 

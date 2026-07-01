@@ -4,7 +4,27 @@ Reads a 3D OBJ file and extracts a 2D cross-section for regression simulation.
 Uses the Fast Marching Method to simulate regression from the inner boundary.
 """
 
+import os
+
 import numpy as np
+import matplotlib
+
+
+def _can_use_gui_backend():
+    try:
+        import tkinter  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+USE_GUI_PLOTS = os.environ.get("MOTOR_MODEL_USE_GUI_PLOTS", "1") == "1"
+
+if USE_GUI_PLOTS and _can_use_gui_backend():
+    matplotlib.use("TkAgg")
+else:
+    matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider
 from scipy.ndimage import distance_transform_edt
