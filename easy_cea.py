@@ -30,6 +30,7 @@ CEA_OUTPUT_ALIASES = {
     "viscosity": "visc",
     "heat_capacity": "cp",
     "chamber_density": "c_rho",
+    "specific_heat": "cp",
 }
 
 CEA_OUTPUT_LABELS = {
@@ -57,7 +58,7 @@ def build_materials() -> list:
         raise KeyError("N2O is missing from prop_maps.PROP_MAP")
 
     fuel = Fuel("HTPB")
-    oxidizer = Oxidizer("N2O")
+    oxidizer = Oxidizer("O2")
     return [fuel, oxidizer]
 
 
