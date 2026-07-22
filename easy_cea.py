@@ -15,6 +15,8 @@ CEA_OUTPUT_ALIASES = {
     "cstar": "cstar",
     "prandtl": "pran",
     "pran": "pran",
+    "h": "h",
+    "enthalpy": "h",
     "mach": "mach",
     "gamma": "gamma",
     "pressure": "p",
@@ -48,6 +50,8 @@ CEA_OUTPUT_LABELS = {
     "mw": "Molecular weight",
     "visc": "Viscosity",
     "cp": "Heat capacity",
+    "h": "Enthalpy",
+    "H": "Enthalpy",
 }
 
 
