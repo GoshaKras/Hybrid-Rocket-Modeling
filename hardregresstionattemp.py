@@ -198,7 +198,7 @@ print(f'Paper_A: {A_paper}, prandtl_number_paper: {prandtl_number_paper}, paperP
 
 
 #harder regression attemp
-amount_of_slots=7
+amount_of_slots=10
 amount_of_sections=amount_of_slots-1
 
 
@@ -214,6 +214,8 @@ class RegressionSlot:
         fuelflux: float =0.0
         OF: float = 0.0
         mdotfuel: float = 0.0
+        Nominal_port_D: float = 0.0
+        Helix_loop_d: float = 0.0
         
 timestep=0.01      
 startreg=regression_totaltry*timestep  
@@ -733,7 +735,22 @@ try:
 except Exception as e:
         print("Failed to write summary CSV:", e)
 
+def reg_checker_constants(a,n,portD,massflowox):
+        time=0
+        totalmdot=0
+        portD=portD
+        while time<=endtime:
+                time+=timestep
+                Oxflux=massflowox/portD**2*np.pi/4
+                regression=a*(Oxflux/10)**n
+                mdotfuel=regression*portD*fuelden*np.pi*lengthinFG
 
+                portD=portD+2*regression*timestep
+                totalmdot=+mdotfuel*timestep
+        print('Total Fuel Mass Consumed (reg_checker_constants):', totalmdot, 'kg')
+        print('Final Port Diameter (reg_checker_constants):', portD, 'm')
+        print('Final Regression Rate (reg_checker_constants):', regression, 'm/s')
+reg_checker_constants(a=0.304,n=0.527,portD=portD,massflowox=massflowox)
 
 
 

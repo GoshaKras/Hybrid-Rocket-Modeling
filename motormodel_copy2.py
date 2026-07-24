@@ -107,6 +107,7 @@ Output="output_thrust.csv"
 inputcdcsv="cd.csv"
 df_cdinput=pd.read_csv(inputcdcsv)
 #General Inputs
+ShowPlots = False  # default: controls pixel-method plotting; may be overridden by vertical inputs
 
 USE_VERTICAL_INPUTS = True # Set to True to load from vertical CSV, False to use hardcoded values
 VERTICAL_INPUTS_FILE = 'inputs_vertical_sample1.csv'
@@ -153,6 +154,7 @@ else:
         InitailGoalof_Chamberpressure_Psi= 400 #psi
         OuterGrainRaduis=0.06985 #m #idk if used
         OuterDiameter_inches=10.5 #inches # for pixel method
+        helixloopdiameter=0.0375 #m
         RawSillyMotorEffceincy=0.8235
         Ncomb_ForChamberPressure=0.85
         NozzleCD_ForChamberPressure=0.97
@@ -181,6 +183,9 @@ else:
         Is_easy_nozzle_regression=True
         Is_fizz_when_equal=False #if false set value
         Is_print_pixelstuff=False
+        Is_fullshape_on_helix=False
+        # Toggle to show or hide pixel-method plots during regression analysis
+        ShowPlots = False
         
         
         #Injector Inputs
@@ -575,7 +580,8 @@ if Exportinputs==True:
 OxtankMath=Oxtank(RealTime,Oxtanktemp,NitrousQuality,StartMass_Gas,StartMass_Liquid,StartMass_TotalOx,Timestep,MetalOxtanktemp)
 OxtankMath.StuffNoPrint(OxtankVolume, Timestep, oxtankLstart,hydroD=HydrolicDiameter,isventopen=isventopen)
 
-FuelGrainMath=FuelGrain(FuelGrainDiameter,fuelGrain_AreaReal,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,HowmuchInj_Help,Is_fuelGrain_Helix,helixrundiameter,Is_fuelgrain_Transient,Is_start_mass_gas_input,StartMass_Gas,Is_FuelGrain_GoshaStar,OneArchlengthestimate,preccandpostvolume,start_gas_gpermole,RealTime,Is_FuelGrain_PixelMethod)
+
+FuelGrainMath=FuelGrain(FuelGrainDiameter,fuelGrain_AreaReal,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,HowmuchInj_Help,Is_fuelGrain_Helix,helixrundiameter,Is_fuelgrain_Transient,Is_start_mass_gas_input,StartMass_Gas,Is_FuelGrain_GoshaStar,OneArchlengthestimate,preccandpostvolume,start_gas_gpermole,RealTime,Is_FuelGrain_PixelMethod,helixloopdiameter=helixloopdiameter)
 FuelGrainMath.stuffnoprint(Is_FuelGrain_PixelMethod,outerdiameter_inches=OuterDiameter_inches,totalComplexArea=TotalComplexArea,Is_fuelGrain_Helix=Is_fuelGrain_Helix)
 FuelGrainMath.should_I_Print(Is_fuelGrain_Helix,Is_fuelgrain_Transient,Is_FuelGrain_GoshaStar,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,start_gas_gpermole,Is_start_mass_gas_input,StartMass_Gas,OneArchlengthestimate,helixrundiameter)
 
@@ -587,9 +593,9 @@ if Is_FuelGrain_GoshaStar==True:
 if Is_sim_flight==True: #fix later
     flighmath=Flight(wetmass,drymass,rocketareaM,startingoutsidetempC,PressureOutsidePa,TempchangePerMeter,realativehumidity,dragcoIfnotcdchart,df_cdinput,drouge_cd,drouge_area,infaltionint,infaltiontime,main_cd,main_area,maindelpyalt,Timestep,RealTime)
     flighmath.stuffnotprint(rocketareaM)
-if Is_FuelGrain_PixelMethod==True:
-    # Run full regression analysis with all graphs
-    FuelGrainMath.run_regression_analysis(r'C:\Users\gosha\Desktop\MotorModelP2\cads\goddard.obj', cross_section_axis=2)
+    if Is_FuelGrain_PixelMethod==True:
+        # Run full regression analysis with all graphs (controlled by ShowPlots)
+        FuelGrainMath.run_regression_analysis(r'C:\Users\gosha\Desktop\MotorModelP2\cads\goddard.obj', cross_section_axis=2, show_plots=ShowPlots)
 
 
 
@@ -649,7 +655,7 @@ try:
         FuelGrainMath.densitys(CEAforRocket)
         #FuelGrainMath.complexregression(CEAforRocket,Fuel_Density,FuelGrainLength)
         if Is_fuelGrain_Helix==True:
-            FuelGrainMath.helixmath(CEAforRocket,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix,revPitch,PitchFor_Helix,AmountofSmallCircles,Is_FuelGrain_PixelMethod,FuelGrainDiameter,expansionratio=NozzleMath.ExpansionRatio,OusideSmallCircle_raduis=OutsideSmallCircle_raduis,helical_archsegment=helicalarchsegmant)
+            FuelGrainMath.helixmath(CEAforRocket,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix,revPitch,PitchFor_Helix,AmountofSmallCircles,Is_FuelGrain_PixelMethod,FuelGrainDiameter,expansionratio=NozzleMath.ExpansionRatio,OusideSmallCircle_raduis=OutsideSmallCircle_raduis,helical_archsegment=helicalarchsegmant,thoart_area=NozzleMath.throatarea)
         if Is_FuelGrain_GoshaStar==True:
             FuelGrainMath.complex_area_func(FuelGrainLength,Timestep,Is_fuelGrain_Helix,Is_FuelGrain_GoshaStar,AmountofSmallCircles,Fuel_Density=Fuel_Density)
         if Is_fuelgrain_Transient==True:
@@ -734,9 +740,10 @@ make_a_graph('time','thrustreal')
 # Create ox pressure vs time graph
 make_a_graph('time','realgaspressure_PA')
 
-# Use non-blocking show so script continues and prints timing info
-plt.ion()  # Turn on interactive mode
-plt.show(block=False)
+# Use non-blocking show so script continues and prints timing info (only if plots enabled)
+if ShowPlots:
+    plt.ion()  # Turn on interactive mode
+    plt.show(block=False)
 
 print("done 2")
 
@@ -851,8 +858,9 @@ elapsed_time = time_module.time() - script_start_time
 print(f"\n{'='*50}")
 print(f"Total runtime: {elapsed_time:.2f} seconds ({elapsed_time/60:.2f} minutes)")
 print(f"{'='*50}")
-plt.ioff()  # Turn off interactive mode
-plt.show(block=True)  # Final blocking show to keep graph open until closed
+if ShowPlots:
+    plt.ioff()  # Turn off interactive mode
+    plt.show(block=True)  # Final blocking show to keep graph open until closed
 
 # Auto-export inputs to vertical CSV
 

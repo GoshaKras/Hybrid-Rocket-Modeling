@@ -23,7 +23,7 @@ from fuel_grain_regression2 import FuelGrainRegressionSimulator
 
 
 class FuelGrain():
-    def __init__(self,FuelGrainDiameter,fuelGrain_AreaReal,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,HowmuchInj_Help,Is_fuelGrain_Helix,helixrundiameter,Is_fuelgrain_Transient,Is_start_mass_gas_input,StartMass_Gas,Is_FuelGrain_GoshaStar,OneArchlengthestimate,preccandpostvolume,start_gas_gpermole,RealTime,Is_FuelGrain_PixelMethod):
+    def __init__(self,FuelGrainDiameter,fuelGrain_AreaReal,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,HowmuchInj_Help,Is_fuelGrain_Helix,helixrundiameter,Is_fuelgrain_Transient,Is_start_mass_gas_input,StartMass_Gas,Is_FuelGrain_GoshaStar,OneArchlengthestimate,preccandpostvolume,start_gas_gpermole,RealTime,Is_FuelGrain_PixelMethod,helixloopdiameter):
         
         self.time=RealTime
         self.diameter_grain=FuelGrainDiameter
@@ -141,7 +141,7 @@ class FuelGrain():
             self.mdotdiff=0
             self.circumdiff=0
             self.areadiff=0
-            self.hydrolicdiamter=None
+            self.hydrolicdiamter=self.diameter_grain
             
         
             self.flowrateRatio_Use=1
@@ -175,6 +175,7 @@ class FuelGrain():
             self.P_circle_overlap=None
             self.arclengthdiffernce=None
             self.ratio_touchedByhelix=None
+            self.p_helixloopdiameter=helixloopdiameter
             
         
             
@@ -460,7 +461,7 @@ class FuelGrain():
        # if Is_fuelGrain_Helix==True:
            # self.insurfacearea = self.insurfacearea + self.surfaceareaadd
 
-    def run_regression_analysis(self, obj_file_path, regression_rate=3.0, time_seconds=30, cross_section_axis=2):
+    def run_regression_analysis(self, obj_file_path, regression_rate=3.0, time_seconds=30, cross_section_axis=2, show_plots=True):
         """
         Run full fuel grain regression analysis with all graphs and curve fits.
         This will display area, perimeter, and inscribed circle diameter graphs.
@@ -471,6 +472,16 @@ class FuelGrain():
             time_seconds: Time to simulate in seconds
             cross_section_axis: Which axis for cross-section (0=X, 1=Y, 2=Z)
         """
+        # Optionally disable interactive plotting so graphs don't pop up
+        _plt_was_interactive = plt.isinteractive()
+        _prev_backend = mpl.get_backend()
+        if not show_plots:
+            try:
+                plt.switch_backend('Agg')
+            except Exception:
+                pass
+            plt.ioff()
+
         # Create simulator instance
         simulator = FuelGrainRegressionSimulator(
             obj_file_path,
@@ -506,18 +517,22 @@ class FuelGrain():
         mm_per_pixel = grid_width / simulator.resolution
         print(f"  Pixel size: {mm_per_pixel:.4f} mm/pixel")
         
-        # Display raw OBJ cross-section
-        print("\nGenerating visualization: OBJ Cross-Section Geometry...")
-        simulator.plot_dxf_geometry()
-        
-        # Display interactive regression slider
-        print("Generating interactive regression visualization...")
-        print("Use the slider to see how regression changes over time\n")
-        simulator.plot_cross_section_interactive(regression_rate, time_seconds)
+        # Display raw OBJ cross-section (optional)
+        if show_plots:
+            print("\nGenerating visualization: OBJ Cross-Section Geometry...")
+            simulator.plot_dxf_geometry()
+            # Display interactive regression slider
+            print("Generating interactive regression visualization...")
+            print("Use the slider to see how regression changes over time\n")
+            simulator.plot_cross_section_interactive(regression_rate, time_seconds)
         
         # Display area vs regression graph and capture coefficients
-        print("Generating area vs regression graph...")
-        self.area_coeffs = simulator.plot_area_vs_regression(max_regression_distance=simulator.id_radius)
+        if show_plots:
+            print("Generating area vs regression graph...")
+            self.area_coeffs = simulator.plot_area_vs_regression(max_regression_distance=simulator.id_radius)
+        else:
+            # compute coefficients without showing plots
+            self.area_coeffs = simulator.plot_area_vs_regression(max_regression_distance=simulator.id_radius)
         
         # Display perimeter vs regression graph and capture coefficients
         print("Generating perimeter vs regression graph...")
@@ -541,6 +556,14 @@ class FuelGrain():
         
         print("\nRegression analysis complete!")
         print(f"Polynomial coefficients stored for pixel method geometry calculations.")
+        # restore interactive plotting state and backend
+        if not show_plots:
+            try:
+                plt.switch_backend(_prev_backend)
+            except Exception:
+                pass
+            if _plt_was_interactive:
+                plt.ion()
 
     def masses_of_stuff(self, Fuel_Density, OxtankMath,Timestep, FuelGrainLength):
         
@@ -578,8 +601,16 @@ class FuelGrain():
         self.chamberDensity= CEAforRocket.get_Chamber_Density(Pc=self.chamberpressure_PSI, MR=self.OF)*16.01846 #convert from lb/ft^3 to kg/m^3
         
 
-    def helixmath(self,CEAforRocket,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix,revPitch,PitchFor_Helix,AmountofSmallCircles,Is_FuelGrain_PixelMethod,FuelGrainDiameter,expansionratio,OusideSmallCircle_raduis,helical_archsegment):
-        self.streamvelocity=np.sqrt(2*((self.chamberpressure_PA-self.throatpressure_PA)/self.chamberDensity))
+    def helixmath(self,CEAforRocket,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix,revPitch,PitchFor_Helix,AmountofSmallCircles,Is_FuelGrain_PixelMethod,FuelGrainDiameter,expansionratio,OusideSmallCircle_raduis,helical_archsegment,thoart_area,):
+        self.fac_CR=(self.hydrolicdiamter*self.hydrolicdiamter*3.14/4)/thoart_area
+        self.chambermach=CEAforRocket.get_Chamber_MachNumber(Pc=self.chamberpressure_PSI, MR=self.OF, fac_CR=self.fac_CR)
+        # Try to get chamber sonic velocity via available API; fall back to a reasonable default
+        #try:
+        self.chambersonicvelocity = CEAforRocket.get_SonicVelocities(Pc=self.chamberpressure_PSI, MR=self.OF, eps=expansionratio)[0]
+        #except Exception:
+            #self.chambersonicvelocity = 340.0
+        self.streamvelocity=self.chambersonicvelocity*self.chambermach
+        #self.streamvelocity=np.sqrt(2*((self.chamberpressure_PA-self.throatpressure_PA)/self.chamberDensity))
         self.chamberstuff=CEAforRocket.get_Chamber_Transport(Pc=self.chamberpressure_PSI, MR=self.OF, eps=expansionratio,frozen=0)
         self.viscosity= self.chamberstuff[1] * 0.0001# kg/m/s
         if Is_FuelGrain_GoshaStar==True:
@@ -653,6 +684,32 @@ class FuelGrain():
         self.CFratio=(((self.CFhelix*self.BlowingRatio/self.cfstraight)-1)*self.ratio_forCF/self.ratiofor_pRC)+1
         if Is_fuelGrain_Helix==False:
             self.CFratio=1
+    def Whole_thing_helix(self,CEAforRocket,expansionratio,thoart_area,Is_FuelGrain_GoshaStar,timestep):
+        self.fac_CR=(self.hydrolicdiamter*self.hydrolicdiamter*3.14/4)/thoart_area
+        self.chambermach=CEAforRocket.get_Chamber_MachNumber(Pc=self.chamberpressure_PSI, MR=self.OF, fac_CR=self.fac_CR)
+        self.chambersonicvelocity = CEAforRocket.get_SonicVelocities(Pc=self.chamberpressure_PSI, MR=self.OF, eps=expansionratio)[0]
+        self.streamvelocity=self.chambersonicvelocity*self.chambermach
+        self.chamberstuff=CEAforRocket.get_Chamber_Transport(Pc=self.chamberpressure_PSI, MR=self.OF, eps=expansionratio,frozen=0)
+        self.viscosity= self.chamberstuff[1] * 0.0001# kg/m/s
+        
+        if self.Is_pixel==True:
+            self.P_reynoldsnumber=(self.streamvelocity*self.hydrolicdiamter*self.chamberDensity)/self.viscosity
+            self.reynoldsnumber=self.P_reynoldsnumber
+        else:
+            self.hydrolicdiamter=self.diameter_grain
+            self.reynoldsnumber=(self.streamvelocity*self.hydrolicdiamter*self.chamberDensity)/self.viscosity
+
+        self.cfstraight=0.074/(self.reynoldsnumber**0.2)
+        if self.Is_pixel==True:
+            self.helixNomminaldiameter=self.hydrolicdiamter
+            self.helixloopdiameter=+ self.regression_M_persec_withratio*timestep
+        else:
+            self.helixloopdiameter=+ self.regression_M_persec_withratio*timestep
+            self.helixNomminaldiameter=+ self.regression_M_persec_withratio*timestep*2 
+            
+
+
+        
         
 
 
