@@ -188,7 +188,7 @@ class FuelGrain():
         self._init_attrs = list(self.__dict__.keys())
         self.outputcsv = pd.DataFrame(columns=self._init_attrs)
         self._output_rows = []
-    def stuffnoprint (self,Is_fuelGrain_PixelMethod,outerdiameter_inches,totalComplexArea,Is_fuelGrain_Helix):
+    def stuffnoprint (self,Is_fuelGrain_PixelMethod,outerdiameter_inches,totalComplexArea,Is_fuelGrain_Helix,revPitch,PitchFor_Helix):
         self.dontcare=0
         self.gamma_chamber=None
         self.gamma_throat=None
@@ -200,7 +200,36 @@ class FuelGrain():
         self.Areabasedon_OuterDiameter_mm=( ( (outerdiameter_inches*25.4)/2 )**2 )*3.14
         self.oldarea_p=totalComplexArea
         self.fuelregcon=0
-        
+        self.helixlength_meters=revPitch*np.sqrt(((self.helixloopdiameter*3.14)**2)+(PitchFor_Helix)**2) 
+        self.HelixP_meters=(self.helixlength_meters/revPitch)
+        self.RC=(self.helixloopdiameter/2)*(1+(self.HelixP_meters/(3.14*self.helixloopdiameter))**2)
+
+    def _effective_burn_length(self, axial_length):
+        if axial_length is None or axial_length <= 0:
+            return axial_length
+
+        stretch_multiplier = 1.0
+
+        helix_length = getattr(self, "helixlength_meters", None)
+        if getattr(self, "Is_helix", False) and helix_length is not None and helix_length > 0:
+            stretch_multiplier = max(stretch_multiplier, float(helix_length) / float(axial_length))
+
+        helix_radius = getattr(self, "helixloopdiameter", None)
+        helix_curvature_radius = getattr(self, "RC", None)
+        if (
+            getattr(self, "Is_helix", False)
+            and helix_radius is not None
+            and helix_radius > 0
+            and helix_curvature_radius is not None
+            and helix_curvature_radius > 0
+        ):
+            stretch_multiplier = max(stretch_multiplier, float(helix_curvature_radius) / float(helix_radius / 2.0))
+
+        helix_correction = getattr(self, "CFratio", None)
+        if getattr(self, "Is_helix", False) and helix_correction is not None and helix_correction > 0:
+            stretch_multiplier = max(stretch_multiplier, float(helix_correction))
+
+        return axial_length * stretch_multiplier
         
 
 
@@ -290,7 +319,7 @@ class FuelGrain():
         self.newraduis=self.oldraduis
         self.newarea=self.oldarea
         self.testRad=self.oldraduis
-        self.insurfacearea2=self.oldpermeter*Fuelgrainlength
+        self.insurfacearea2=self.oldpermeter*self._effective_burn_length(Fuelgrainlength)
         self.testArea=TotalComplexArea
         self.testCircum=ComplexPerimeter
         
@@ -327,20 +356,21 @@ class FuelGrain():
         self.totalregression_MM=self.totalrgession*1000/2 #for pixel method
     def simpleCircleGeo(self,FuelGrainLength,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix):
         self.portperimeter= self.diameter_grain*3.14
-        self.insurfacearea=self.portperimeter*FuelGrainLength
+        effective_length = self._effective_burn_length(FuelGrainLength)
+        self.insurfacearea=self.portperimeter*effective_length
         self.diameter_grain=self.diameter_grain+(self.regression_M_persec*Timestep*2)
         self.fuelgrain_raduis=self.diameter_grain/2
         self.area_grain=(self.fuelgrain_raduis*self.fuelgrain_raduis*3.14)
         self.volume_grain=self.area_grain*FuelGrainLength
         if Is_FuelGrain_GoshaStar==True:
             self.area_grain=self.eQarea
-            self.insurfacearea=self.complexcircum*FuelGrainLength
+            self.insurfacearea=self.complexcircum*effective_length
         if self.Is_pixel==True:
             self.area_grain=self.pixelAREA
-            self.insurfacearea=self.P_perimeter*FuelGrainLength
+            self.insurfacearea=self.P_perimeter*effective_length
         if Is_fuelGrain_Helix==True:
-            self.insurfacearea=self.insurfacearea+self.surfaceareaadd
-            self.addtoarea_bcHelix=((self.surfaceareaadd/(FuelGrainLength*6.28))**2) * 3.14 #not used
+            self.surfaceareaadd=0
+            self.addtoarea_bcHelix=0
                          
         self.volume_grain=self.area_grain*FuelGrainLength
     def pixelmethodgeo(self,Is_fuelGrain_Helix,FuelGrainLength,Fuel_Density,Timestep,amountofsmallcircles):
@@ -407,7 +437,8 @@ class FuelGrain():
         self.P_perimeter = np.polyval(perimeter_coeffs, x)
         self.P_perimeter = max(0, self.P_perimeter)
         self.P_perimeter=self.P_perimeter/1000  # Ensure non-negative
-        self.P_surfacearea=self.P_perimeter*FuelGrainLength
+        effective_length = self._effective_burn_length(FuelGrainLength)
+        self.P_surfacearea=self.P_perimeter*effective_length
         
         # Max inscribed circle diameter calculation (mm) from polynomial fit - uses np.polyval for variable degree
         self.P_max_inscribed_diameter = np.polyval(max_inscribed_coeffs, x)
@@ -440,7 +471,7 @@ class FuelGrain():
         
         self.Howcircle=1/(self.P_eqPerimeter/self.P_perimeter)
         if self.time>=Timestep:
-            self.p_mdotfuel=(self.P_perimeter+self.oldpixelcircum)*Fuel_Density*FuelGrainLength*self.regression_M_persec_withratio*0.5
+            self.p_mdotfuel=(self.P_perimeter+self.oldpixelcircum)*Fuel_Density*effective_length*self.regression_M_persec_withratio*0.5
 
         self.oldpixelcircum=self.P_perimeter
         self.diameter_minmax_diff=self.P_min_enclosing_diameter - self.P_max_inscribed_diameter
@@ -684,7 +715,7 @@ class FuelGrain():
         self.CFratio=(((self.CFhelix*self.BlowingRatio/self.cfstraight)-1)*self.ratio_forCF/self.ratiofor_pRC)+1
         if Is_fuelGrain_Helix==False:
             self.CFratio=1
-    def Whole_thing_helix(self,CEAforRocket,expansionratio,thoart_area,Is_FuelGrain_GoshaStar,timestep):
+    def Whole_thing_helix(self,CEAforRocket,expansionratio,thoart_area,Is_FuelGrain_GoshaStar,timestep,revPitch,PitchFor_Helix):
         self.fac_CR=(self.hydrolicdiamter*self.hydrolicdiamter*3.14/4)/thoart_area
         self.chambermach=CEAforRocket.get_Chamber_MachNumber(Pc=self.chamberpressure_PSI, MR=self.OF, fac_CR=self.fac_CR)
         self.chambersonicvelocity = CEAforRocket.get_SonicVelocities(Pc=self.chamberpressure_PSI, MR=self.OF, eps=expansionratio)[0]
@@ -697,15 +728,23 @@ class FuelGrain():
             self.reynoldsnumber=self.P_reynoldsnumber
         else:
             self.hydrolicdiamter=self.diameter_grain
+            if self.time==timestep:
+                self.OGHD=self.hydrolicdiamter
             self.reynoldsnumber=(self.streamvelocity*self.hydrolicdiamter*self.chamberDensity)/self.viscosity
 
         self.cfstraight=0.074/(self.reynoldsnumber**0.2)
         if self.Is_pixel==True:
             self.helixNomminaldiameter=self.hydrolicdiamter
-            self.helixloopdiameter=+ self.regression_M_persec_withratio*timestep
         else:
-            self.helixloopdiameter=+ self.regression_M_persec_withratio*timestep
-            self.helixNomminaldiameter=+ self.regression_M_persec_withratio*timestep*2 
+            self.helixNomminaldiameter=+ self.regression_M_persec_withratio*timestep*2
+        self.S_forhelix=self.totalrgession/2
+        self.CorrectionRC=(np.sqrt(1+1.57*(((self.hydrolicdiamter-self.OGHD)/self.RC)**2)))*self.RC
+        self.CFhelix=self.cfstraight+0.0075*(np.sqrt(self.helixNomminaldiameter/(2*self.CorrectionRC)))
+        self.CFratio=self.CFhelix/self.cfstraight
+        
+
+
+        
             
 
 
@@ -763,7 +802,9 @@ class FuelGrain():
         self.anothermdot= (self.testCircum*Fuel_Density*FuelGrainLength*self.regression_M_persec_withratio) 
         self.modratio=self.Howcircle/self.mod_circcheck
         
-        self.insurfacearea2=self.testCircum*FuelGrainLength
+        effective_length = self._effective_burn_length(FuelGrainLength)
+        self.insurfacearea2=self.testCircum*effective_length
+        self.anothermdot= self.insurfacearea2*Fuel_Density*self.regression_M_persec_withratio
         self.mdotdiff=abs(1-(self.anothermdot/self.mdotfuel))*100
         self.circumdiff=abs(1-(self.testCircum/self.P_perimeter))*100
         self.areadiff=abs(1-(self.testArea/self.pixelAREA))*100\
@@ -779,11 +820,7 @@ class FuelGrain():
             self.ratiohelp=self.arclength_rweclose/self.onearchlengthestimate
             
         if Is_fuelGrain_Helix==True:
-            if self.Newarclengthesitmate>0:
-                self.surfaceareaadd=(((3.14*self.smallcircleraduis)-self.smallcircleraduis)*2*self.circleamount*(self.helixlength_meters-FuelGrainLength))
-                self.surfaceareaadd=self.surfaceareaadd*self.flowrateRatio/self.flowrateRatio 
-                
-
+            self.surfaceareaadd=0
         else:
             self.surfaceareaadd=0
 
