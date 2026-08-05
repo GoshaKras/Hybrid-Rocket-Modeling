@@ -200,9 +200,10 @@ class FuelGrain():
         self.Areabasedon_OuterDiameter_mm=( ( (outerdiameter_inches*25.4)/2 )**2 )*3.14
         self.oldarea_p=totalComplexArea
         self.fuelregcon=0
-        self.helixlength_meters=revPitch*np.sqrt(((self.helixloopdiameter*3.14)**2)+(PitchFor_Helix)**2) 
-        self.HelixP_meters=(self.helixlength_meters/revPitch)
-        self.RC=(self.helixloopdiameter/2)*(1+(self.HelixP_meters/(3.14*self.helixloopdiameter))**2)
+        if Is_fuelGrain_Helix==True:
+            self.helixlength_meters=revPitch*np.sqrt(((self.helixloopdiameter*3.14)**2)+(PitchFor_Helix)**2) 
+            self.HelixP_meters=(self.helixlength_meters/revPitch)
+            self.RC=(self.helixloopdiameter/2)*(1+(self.HelixP_meters/(3.14*self.helixloopdiameter))**2)
 
     def _effective_burn_length(self, axial_length):
         if axial_length is None or axial_length <= 0:

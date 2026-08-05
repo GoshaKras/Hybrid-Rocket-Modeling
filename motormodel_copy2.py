@@ -110,7 +110,7 @@ df_cdinput=pd.read_csv(inputcdcsv)
 ShowPlots = False  # default: controls pixel-method plotting; may be overridden by vertical inputs
 
 USE_VERTICAL_INPUTS = True # Set to True to load from vertical CSV, False to use hardcoded values
-VERTICAL_INPUTS_FILE = 'inputs_vertical_sample1.csv'
+VERTICAL_INPUTS_FILE = 'inputs_vertical_sample.csv'
 Exportinputs=False  # Set to True to export inputs to vertical CSV
 
 
@@ -270,6 +270,7 @@ if True:
     rocketdiameterM= rocketdiameterIn*0.0254 #M
     rocketareaM= rocketdiameterM*rocketdiameterM*0.25*3.14
     PressureOutsidePa= pressureOutsideIn*3386.39 #PA
+    helixloopdiameter=helixrundiameter
     
     
     isventopen=True
@@ -577,7 +578,7 @@ if Exportinputs==True:
 
     
 
-OxtankMath=Oxtank(RealTime,Oxtanktemp,NitrousQuality,StartMass_Gas,StartMass_Liquid,StartMass_TotalOx,Timestep,MetalOxtanktemp)
+OxtankMath=Oxtank(RealTime,Oxtanktemp,NitrousQuality,StartMass_Gas,StartMass_Liquid,StartMass_TotalOx,Timestep,MetalOxtanktemp,volumetank=OxtankVolume)
 OxtankMath.StuffNoPrint(OxtankVolume, Timestep, oxtankLstart,hydroD=HydrolicDiameter,isventopen=isventopen)
 
 
@@ -627,6 +628,7 @@ try:
         OxtankMath.cheatcheack()
         OxtankMath.Massesofshit()
         OxtankMath.FindVapour(ventcd=VentCD, ventarea=3.14*(VentDiameter/2)**2,ambientpressure_pa=PressureOutsidePa)
+        OxtankMath.Internal_enegry_change(ventcd=VentCD, ventarea=3.14*(VentDiameter/2)**2,ambientpressure_pa=PressureOutsidePa)
         OxtankMath.Tempofnitrous()
         OxtankMath.Derivatives()
         OxtankMath.Status(StartMass_Liquid,OxamountwhenfizzstartsConstant,Is_fizz_when_equal,Fizzstart2)

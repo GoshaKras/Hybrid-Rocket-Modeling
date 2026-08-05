@@ -2125,11 +2125,11 @@ class FuelGrainRegressionSimulator:
 def main():
     """Main execution function"""
     # Configuration
-    obj_file = r'C:\Users\gosha\Desktop\MotorModelP2\Hybrid Rocket model\circlehellixed.obj'  # Path to the OBJ file
+    obj_file = r'C:\Users\gosha\Desktop\MotorModelP2\Hybrid Rocket model\goshastar.obj'  # Path to the OBJ file
     outer_diameter_inches = 6.74  # Will be overridden by actual geometry
     regression_rate = 3  # mm/sec
     time_seconds = 40  # seconds
-    cross_section_axis = 0 # 0=X, 1=Y, 2=Z (Z is top-down view)
+    cross_section_axis = 1 # 0=X, 1=Y, 2=Z (Z is top-down view)
     
     # Check if OBJ file exists
     if not Path(obj_file).exists():

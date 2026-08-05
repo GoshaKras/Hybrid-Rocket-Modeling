@@ -14,7 +14,7 @@ import inputs_io
 from rocketcea.cea_obj import CEA_Obj, add_new_fuel, add_new_oxidizer, add_new_propellant
 
 class Oxtank():
-    def __init__(self,RealTime,Oxtanktemp,NitrousQuality,StartMass_Gas,StartMass_Liquid,StartMass_TotalOx,Timestep,MetalOxtanktemp):
+    def __init__(self,RealTime,Oxtanktemp,NitrousQuality,StartMass_Gas,StartMass_Liquid,StartMass_TotalOx,Timestep,MetalOxtanktemp,volumetank):
         self.time=RealTime
         self.Den_Gas=None
         self.Den_Liquid=None
@@ -26,6 +26,7 @@ class Oxtank():
         self.fluid_Cv=None
         self.time2=RealTime
         self.Oxtanktemp = Oxtanktemp
+        self.t_Oxtanktemp=Oxtanktemp
         self.NitrousQuality = NitrousQuality
         self.SpecificHeat=None
         self.PressureDiff_PA=None
@@ -38,11 +39,13 @@ class Oxtank():
         self.RealMassFlowRate=None
         self.MdotOxpertick= None
         self.Vapourmass= StartMass_Gas
+        self.t_vapourmass= StartMass_Gas
         self.liquidmassold=StartMass_Liquid
         self.totaloxmass= StartMass_TotalOx
         self.liquidmassflowrate=None
         self.vapourmassflowrate=0
         self.liquidmassnew=StartMass_Liquid
+        self.t_liquidmassnew=StartMass_Liquid
         self.AmountVaped=0
         self.status="liquid"
         self.fizz_X=0
@@ -127,11 +130,23 @@ class Oxtank():
         self.Reynoldsnumber_HEM=None
         self.Reynoldsnumber_SPI=None
         self.Den_forCD=None
+        self.u_vap=PropsSI('U', 'T', self.Oxtanktemp, 'Q',1, 'NitrousOxide')
+        self.u_liquid=PropsSI('U', 'T', self.Oxtanktemp, 'Q',0, 'NitrousOxide')
+        self.totalinternalenergy= self.liquidmassnew*self.u_liquid+self.Vapourmass*self.u_vap
+        self.guess_total_u=self.liquidmassold*self.u_liquid+self.Vapourmass*self.u_vap
+        self.nitrousTankDen=self.totaloxmass/volumetank
+        self.spec_interanl_energy_u=self.totalinternalenergy/self.totaloxmass
+        self.spec_entropy_tank=PropsSI('S', 'D', self.nitrousTankDen, 'U', self.spec_interanl_energy_u, 'NitrousOxide')
+        self.total_entropy=self.spec_entropy_tank*self.totaloxmass
+        self.oldtotal_entr=self.total_entropy
+        self.sigma=0
+        self.nitroustank_quality=PropsSI('Q', 'D', self.nitrousTankDen, 'U', self.spec_interanl_energy_u, 'NitrousOxide')
+        self.test_quality=self.Vapourmass/self.totaloxmass
+        self.specinternalenthapy_h_liquid=PropsSI('H', 'T', self.t_Oxtanktemp, 'Q', 0, 'NitrousOxide')
+        self.specinternalenthapy_h_vap=PropsSI('H', 'T', self.t_Oxtanktemp, 'Q', 1, 'NitrousOxide')
+        self.gas_spec_entropy=0
+        self.startentropyspec=0
         
-        
-        
-        
-
         #csv stuff
         self._init_attrs = list(self.__dict__.keys())
         self.outputcsv = pd.DataFrame(columns=self._init_attrs)
@@ -189,6 +204,8 @@ class Oxtank():
         self.injectorLength=1.2*2.54/100
         self.LDratio=self.injectorLength/self.injectorhydrolicdiameter
         self.Vent_happen=isventopen
+        self.Use_internal_energy_change=True
+        self.calvent=True
         
 
         
@@ -253,6 +270,8 @@ class Oxtank():
     
         self.MdotOxpertick= self.RealMassFlowRate*Timestep
         self.liquidmassflowrate= self.RealMassFlowRate*Timestep*(1-self.NitrousQuality)
+        if self.status=="Vapour":
+            self.liquidmassflowrate=0
         if self.status == "Liquid":
             
 
@@ -290,13 +309,52 @@ class Oxtank():
         else:
             self.Vapourmass-=self.vapourmassflowrate
 
+    def Internal_enegry_change(self,ventcd,ventarea,ambientpressure_pa):
         
-    def FindVapour(self,ventcd,ventarea,ambientpressure_pa):
+        self.specinternalenthapy_h_vap=PropsSI('H', 'T', self.t_Oxtanktemp, 'Q', 1, 'NitrousOxide')
+        
+        self.specinternalenthapy_h_liquid=PropsSI('H', 'T', self.t_Oxtanktemp, 'Q', 0, 'NitrousOxide')
         if self.Vent_happen==True:
             self.Vent_mdot=ventcd*ventarea*np.sqrt(2*self.Den_Gas*(self.Vapour_PressurePa-ambientpressure_pa))
             self.totaloxmass-=self.Vent_mdot*self.timestep
-            #self.Vapourmass-=self.Vent_mdot*self.timestep
+            self.calvent==False
+        else:
+            self.Vent_mdot=0
+        self.nitrousTankDen=self.totaloxmass/self.vtank
+        self.u_liquid=PropsSI('U', 'T', self.t_Oxtanktemp, 'Q', 0, 'NitrousOxide')
+        self.u_vap=PropsSI('U', 'T', self.t_Oxtanktemp, 'Q', 1, 'NitrousOxide')
+        if self.status=="Liquid":
+            self.totalinternalenergy-=(self.liquidmassflowrate*self.specinternalenthapy_h_liquid+self.vapourmassflowrate*self.specinternalenthapy_h_vap+self.Vent_mdot*self.specinternalenthapy_h_vap*self.timestep)
+        else:
+            self.specinternalenthapy_h_vap=PropsSI('H', 'T', self.t_Oxtanktemp, 'D', self.nitrousTankDen, 'NitrousOxide')
+            self.totalinternalenergy-=(self.vapourmassflowrate*self.specinternalenthapy_h_vap+self.Vent_mdot*self.specinternalenthapy_h_vap*self.timestep)
+        self.spec_interanl_energy_u=self.totalinternalenergy/self.totaloxmass
+        
+        self.nitroustank_quality=PropsSI('Q', 'D', self.nitrousTankDen, 'U', self.spec_interanl_energy_u, 'NitrousOxide')
+        self.test_quality=self.Vapourmass/self.totaloxmass
+        self.guess_total_u=self.liquidmassnew*self.u_liquid+self.Vapourmass*self.u_vap
+        self.t_vapourmass=self.nitroustank_quality*self.totaloxmass
+        self.t_liquidmassnew=(1-self.nitroustank_quality)*self.totaloxmass
+        
+        self.oldtotal_entr=self.total_entropy
+        self.spec_entropy_tank=PropsSI('S', 'D', self.nitrousTankDen, 'U', self.spec_interanl_energy_u, 'NitrousOxide')
+        self.total_entropy=self.spec_entropy_tank*self.totaloxmass
+        self.deltaS=self.total_entropy-self.oldtotal_entr
+        self.spec_entropy_vap=PropsSI('S', 'T', self.t_Oxtanktemp, 'Q', 1, 'NitrousOxide')
+        self.spec_entropy_liquid=PropsSI('S', 'T', self.t_Oxtanktemp, 'Q', 0, 'NitrousOxide')
+        self.entropychange=(self.liquidmassflowrate*self.spec_entropy_liquid+self.vapourmassflowrate*self.spec_entropy_vap+self.Vent_mdot*self.spec_entropy_vap*self.timestep)
+        self.t_Oxtanktemp=PropsSI('T', 'D', self.nitrousTankDen, 'U', self.spec_interanl_energy_u, 'NitrousOxide')
+        self.sigma=self.deltaS+self.entropychange
+        
+         
+    def FindVapour(self,ventcd,ventarea,ambientpressure_pa):
+        if self.Vent_happen==True and self.calvent==True:
+            # Calculate the mass flow rate through the vent
+            self.Vent_mdot=ventcd*ventarea*np.sqrt(2*self.Den_Gas*(self.Vapour_PressurePa-ambientpressure_pa))
+            self.totaloxmass-=self.Vent_mdot*self.timestep
+            self.Vapourmass-=self.Vent_mdot*self.timestep
         self.AmountVaped=self.liquidmassold-self.liquidmassnew-(self.Vent_mdot*self.timestep)
+        
     def Tempofnitrous(self):
         
 
@@ -494,6 +552,8 @@ class Oxtank():
                 self.tempprint=PropsSI('T', 'D|gas',  self.vapden, 'S', self.startentropyspec, 'NitrousOxide')
                 self.vappressure_duringphase=PropsSI('P', 'D|gas',  self.vapden, 'S', self.startentropyspec, 'NitrousOxide')
                 self.correctz=PropsSI('Z', 'D|gas',  self.vapden, 'S', self.startentropyspec, 'NitrousOxide')
+                self.gas_spec_entropy=PropsSI('S', 'D|gas',  self.vapden, 'T', self.tempprint, 'NitrousOxide')
+                #self.startentropyspec=self.gas_spec_entropy
         
 
     def heattransferoxtank(self,oxtankID,oxtanksurfaceareainput,oxtankmass,oxtankspecheat,Timestep):
