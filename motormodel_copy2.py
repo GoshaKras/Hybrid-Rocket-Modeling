@@ -272,7 +272,7 @@ if True:
     PressureOutsidePa= pressureOutsideIn*3386.39 #PA
     helixloopdiameter=helixrundiameter
     
-    
+    Use_U=True
     isventopen=True
     #stuff to add to csv
     #max_at_what_pressure_psi= 400 #psi
@@ -625,12 +625,17 @@ try:
         OxtankMath.CoolOxtankProp(RealTime)
         #OxtankMath.twophaseflow_genstuff()
         OxtankMath.Massflowrate(Timestep, Is_2phase_flow_injector_model, DischargeCo_SPI, InjectorArea, chamberpressure_PA=FuelGrainMath.chamberpressure_PA)
-        OxtankMath.cheatcheack()
-        OxtankMath.Massesofshit()
-        OxtankMath.FindVapour(ventcd=VentCD, ventarea=3.14*(VentDiameter/2)**2,ambientpressure_pa=PressureOutsidePa)
-        OxtankMath.Internal_enegry_change(ventcd=VentCD, ventarea=3.14*(VentDiameter/2)**2,ambientpressure_pa=PressureOutsidePa)
-        OxtankMath.Tempofnitrous()
-        OxtankMath.Derivatives()
+        
+        
+        
+        if Use_U==False:
+            OxtankMath.cheatcheack()
+            OxtankMath.Massesofshit()
+            OxtankMath.FindVapour(ventcd=VentCD, ventarea=3.14*(VentDiameter/2)**2,ambientpressure_pa=PressureOutsidePa)
+            OxtankMath.Tempofnitrous()
+            OxtankMath.Derivatives()
+        else:
+            OxtankMath.Internal_enegry_change(ventcd=VentCD, ventarea=3.14*(VentDiameter/2)**2,ambientpressure_pa=PressureOutsidePa)
         OxtankMath.Status(StartMass_Liquid,OxamountwhenfizzstartsConstant,Is_fizz_when_equal,Fizzstart2)
         OxtankMath.Fizz(FizzCurveConstant)
         OxtankMath.NitrousQuality_func()

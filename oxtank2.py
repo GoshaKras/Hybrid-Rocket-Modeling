@@ -310,7 +310,7 @@ class Oxtank():
             self.Vapourmass-=self.vapourmassflowrate
 
     def Internal_enegry_change(self,ventcd,ventarea,ambientpressure_pa):
-        
+        self.totaloxmass-=(self.liquidmassflowrate+self.vapourmassflowrate)
         self.specinternalenthapy_h_vap=PropsSI('H', 'T', self.t_Oxtanktemp, 'Q', 1, 'NitrousOxide')
         
         self.specinternalenthapy_h_liquid=PropsSI('H', 'T', self.t_Oxtanktemp, 'Q', 0, 'NitrousOxide')
@@ -330,7 +330,10 @@ class Oxtank():
             self.totalinternalenergy-=(self.vapourmassflowrate*self.specinternalenthapy_h_vap+self.Vent_mdot*self.specinternalenthapy_h_vap*self.timestep)
         self.spec_interanl_energy_u=self.totalinternalenergy/self.totaloxmass
         
+
         self.nitroustank_quality=PropsSI('Q', 'D', self.nitrousTankDen, 'U', self.spec_interanl_energy_u, 'NitrousOxide')
+        if self.status=="Vapour":
+            self.nitroustank_quality=1
         self.test_quality=self.Vapourmass/self.totaloxmass
         self.guess_total_u=self.liquidmassnew*self.u_liquid+self.Vapourmass*self.u_vap
         self.t_vapourmass=self.nitroustank_quality*self.totaloxmass
@@ -345,7 +348,12 @@ class Oxtank():
         self.entropychange=(self.liquidmassflowrate*self.spec_entropy_liquid+self.vapourmassflowrate*self.spec_entropy_vap+self.Vent_mdot*self.spec_entropy_vap*self.timestep)
         self.t_Oxtanktemp=PropsSI('T', 'D', self.nitrousTankDen, 'U', self.spec_interanl_energy_u, 'NitrousOxide')
         self.sigma=self.deltaS+self.entropychange
-        
+        # stuff that is new noew
+        self.liquidmassnew=self.t_liquidmassnew
+        self.liquidmassold=self.t_liquidmassnew
+        self.Vapourmass=self.t_vapourmass
+        self.Oxtanktemp=self.t_Oxtanktemp
+
          
     def FindVapour(self,ventcd,ventarea,ambientpressure_pa):
         if self.Vent_happen==True and self.calvent==True:
@@ -420,6 +428,8 @@ class Oxtank():
             if self.fizzcancled==True:
                 self.status="Liquid"
         else:
+            self.status="Vapour"
+        if self.Vapourmass/self.totaloxmass>0.99:
             self.status="Vapour"
     def Fizz(self,FizzCurveConstant):
         if self.status=="fizz" and self.fizznumber==0:
@@ -553,7 +563,7 @@ class Oxtank():
                 self.vappressure_duringphase=PropsSI('P', 'D|gas',  self.vapden, 'S', self.startentropyspec, 'NitrousOxide')
                 self.correctz=PropsSI('Z', 'D|gas',  self.vapden, 'S', self.startentropyspec, 'NitrousOxide')
                 self.gas_spec_entropy=PropsSI('S', 'D|gas',  self.vapden, 'T', self.tempprint, 'NitrousOxide')
-                #self.startentropyspec=self.gas_spec_entropy
+                self.startentropyspec=self.gas_spec_entropy
         
 
     def heattransferoxtank(self,oxtankID,oxtanksurfaceareainput,oxtankmass,oxtankspecheat,Timestep):
