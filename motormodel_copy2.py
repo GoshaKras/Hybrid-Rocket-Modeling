@@ -107,10 +107,12 @@ Output="output_thrust.csv"
 inputcdcsv="cd.csv"
 df_cdinput=pd.read_csv(inputcdcsv)
 #General Inputs
-ShowPlots = False  # default: controls pixel-method plotting; may be overridden by vertical inputs
+ShowPlots = True  # default: controls pixel-method plotting; may be overridden by vertical inputs
+PlotLengthUnit = 'mm'
+PlotAreaUnit = None
 
 USE_VERTICAL_INPUTS = True # Set to True to load from vertical CSV, False to use hardcoded values
-VERTICAL_INPUTS_FILE = 'inputs_vertical_sample.csv'
+VERTICAL_INPUTS_FILE = 'inputs_vertical_sample1.csv'
 Exportinputs=False  # Set to True to export inputs to vertical CSV
 
 
@@ -274,6 +276,9 @@ if True:
     
     Use_U=True
     isventopen=True
+    Whole_thing_helix= False
+    #OuterDiameter_inches=10.5 #change if csv is different
+    
     #stuff to add to csv
     #max_at_what_pressure_psi= 400 #psi
     #max_at_what_OF_ratio= 6.3
@@ -582,7 +587,7 @@ OxtankMath=Oxtank(RealTime,Oxtanktemp,NitrousQuality,StartMass_Gas,StartMass_Liq
 OxtankMath.StuffNoPrint(OxtankVolume, Timestep, oxtankLstart,hydroD=HydrolicDiameter,isventopen=isventopen)
 
 
-FuelGrainMath=FuelGrain(FuelGrainDiameter,fuelGrain_AreaReal,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,HowmuchInj_Help,Is_fuelGrain_Helix,helixrundiameter,Is_fuelgrain_Transient,Is_start_mass_gas_input,StartMass_Gas,Is_FuelGrain_GoshaStar,OneArchlengthestimate,preccandpostvolume,start_gas_gpermole,RealTime,Is_FuelGrain_PixelMethod,helixloopdiameter=helixloopdiameter)
+FuelGrainMath=FuelGrain(FuelGrainDiameter,fuelGrain_AreaReal,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,HowmuchInj_Help,Is_fuelGrain_Helix,helixrundiameter,Is_fuelgrain_Transient,Is_start_mass_gas_input,StartMass_Gas,Is_FuelGrain_GoshaStar,OneArchlengthestimate,preccandpostvolume,start_gas_gpermole,RealTime,Is_FuelGrain_PixelMethod,helixloopdiameter=helixloopdiameter,plot_length_unit=PlotLengthUnit,plot_area_unit=PlotAreaUnit)
 FuelGrainMath.stuffnoprint(Is_FuelGrain_PixelMethod,outerdiameter_inches=OuterDiameter_inches,totalComplexArea=TotalComplexArea,Is_fuelGrain_Helix=Is_fuelGrain_Helix,revPitch=revPitch,PitchFor_Helix=PitchFor_Helix)
 FuelGrainMath.should_I_Print(Is_fuelGrain_Helix,Is_fuelgrain_Transient,Is_FuelGrain_GoshaStar,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,start_gas_gpermole,Is_start_mass_gas_input,StartMass_Gas,OneArchlengthestimate,helixrundiameter)
 
@@ -596,7 +601,7 @@ if Is_sim_flight==True: #fix later
     flighmath.stuffnotprint(rocketareaM)
     if Is_FuelGrain_PixelMethod==True:
         # Run full regression analysis with all graphs (controlled by ShowPlots)
-        FuelGrainMath.run_regression_analysis(r'C:\Users\gosha\Desktop\MotorModelP2\cads\goddard.obj', cross_section_axis=2, show_plots=ShowPlots)
+        FuelGrainMath.run_regression_analysis(r'C:\Users\gosha\Desktop\MotorModelP2\cads\Goddard.obj', cross_section_axis=2, show_plots=ShowPlots, plot_length_unit=PlotLengthUnit, plot_area_unit=PlotAreaUnit)
 
 
 
@@ -662,7 +667,10 @@ try:
         FuelGrainMath.densitys(CEAforRocket)
         #FuelGrainMath.complexregression(CEAforRocket,Fuel_Density,FuelGrainLength)
         if Is_fuelGrain_Helix==True:
-            FuelGrainMath.helixmath(CEAforRocket,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix,revPitch,PitchFor_Helix,AmountofSmallCircles,Is_FuelGrain_PixelMethod,FuelGrainDiameter,expansionratio=NozzleMath.ExpansionRatio,OusideSmallCircle_raduis=OutsideSmallCircle_raduis,helical_archsegment=helicalarchsegmant,thoart_area=NozzleMath.throatarea)
+            if Whole_thing_helix==True:
+                FuelGrainMath.Whole_thing_helix(CEAforRocket,NozzleMath.ExpansionRatio,NozzleMath.throatarea,Is_FuelGrain_GoshaStar=Is_FuelGrain_GoshaStar,timestep=Timestep,revPitch=revPitch,PitchFor_Helix=PitchFor_Helix)
+            else:
+                FuelGrainMath.helixmath(CEAforRocket,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix,revPitch,PitchFor_Helix,AmountofSmallCircles,Is_FuelGrain_PixelMethod,FuelGrainDiameter,expansionratio=NozzleMath.ExpansionRatio,OusideSmallCircle_raduis=OutsideSmallCircle_raduis,helical_archsegment=helicalarchsegmant,thoart_area=NozzleMath.throatarea)
         if Is_FuelGrain_GoshaStar==True:
             FuelGrainMath.complex_area_func(FuelGrainLength,Timestep,Is_fuelGrain_Helix,Is_FuelGrain_GoshaStar,AmountofSmallCircles,Fuel_Density=Fuel_Density)
         if Is_fuelgrain_Transient==True:

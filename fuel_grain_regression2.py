@@ -26,6 +26,7 @@ else:
     matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 from matplotlib.widgets import Slider
 from scipy.ndimage import distance_transform_edt
 from scipy import ndimage
@@ -42,8 +43,24 @@ np.set_printoptions(threshold=10000)
 
 class FuelGrainRegressionSimulator:
     """Simulates fuel grain regression using Fast Marching Method"""
+
+    PLOT_LENGTH_UNIT_ALIASES = {
+        'mm': ('mm', 1.0),
+        'millimeter': ('mm', 1.0),
+        'millimeters': ('mm', 1.0),
+        'cm': ('cm', 10.0),
+        'centimeter': ('cm', 10.0),
+        'centimeters': ('cm', 10.0),
+        'm': ('m', 1000.0),
+        'meter': ('m', 1000.0),
+        'meters': ('m', 1000.0),
+        'in': ('in', 25.4),
+        'inch': ('in', 25.4),
+        'inches': ('in', 25.4),
+    }
     
-    def __init__(self, obj_file_path, outer_diameter_inches=5.0, resolution=500, cross_section_axis=2, cross_section_pos=None):
+    def __init__(self, obj_file_path, outer_diameter_inches=5.0, resolution=500, cross_section_axis=2, cross_section_pos=None,
+                 plot_length_unit='mm', plot_area_unit=None):
         """
         Initialize the simulator.
         
@@ -53,6 +70,8 @@ class FuelGrainRegressionSimulator:
             resolution: Grid resolution for the simulation (pixels)
             cross_section_axis: Which axis to take cross-section perpendicular to (0=X, 1=Y, 2=Z)
             cross_section_pos: Position along axis for cross-section (None = center)
+            plot_length_unit: Display unit for length-based plots and annotations
+            plot_area_unit: Display unit for area-based plots and annotations. If None, it is derived from plot_length_unit.
         """
         self.obj_file = obj_file_path
         self.resolution = resolution
@@ -64,6 +83,67 @@ class FuelGrainRegressionSimulator:
         self.cross_section_axis = cross_section_axis
         self.cross_section_pos = cross_section_pos
         self.center_bore_surface_area_mm2 = None
+        self.set_plot_units(plot_length_unit, plot_area_unit)
+
+    def set_plot_units(self, plot_length_unit='mm', plot_area_unit=None):
+        """Set display-only plot units without changing the internal millimeter-based math."""
+        normalized_length_unit = plot_length_unit.strip().lower()
+        if normalized_length_unit not in self.PLOT_LENGTH_UNIT_ALIASES:
+            allowed_units = ', '.join(sorted(set(alias[0] for alias in self.PLOT_LENGTH_UNIT_ALIASES.values())))
+            raise ValueError(f"Unsupported plot length unit '{plot_length_unit}'. Allowed units: {allowed_units}")
+
+        self.plot_length_unit, self.plot_length_scale_mm = self.PLOT_LENGTH_UNIT_ALIASES[normalized_length_unit]
+
+        if plot_area_unit is None:
+            self.plot_area_unit = f"{self.plot_length_unit}^2"
+            self.plot_area_scale_mm2 = self.plot_length_scale_mm ** 2
+        else:
+            normalized_area_unit = plot_area_unit.strip().lower().replace(' ', '')
+            area_aliases = {
+                'mm^2': ('mm^2', 1.0),
+                'mm2': ('mm^2', 1.0),
+                'cm^2': ('cm^2', 100.0),
+                'cm2': ('cm^2', 100.0),
+                'm^2': ('m^2', 1000000.0),
+                'm2': ('m^2', 1000000.0),
+                'in^2': ('in^2', 25.4 ** 2),
+                'in2': ('in^2', 25.4 ** 2),
+            }
+            if normalized_area_unit not in area_aliases:
+                allowed_area_units = ', '.join(sorted({unit for unit, _ in area_aliases.values()}))
+                raise ValueError(f"Unsupported plot area unit '{plot_area_unit}'. Allowed units: {allowed_area_units}")
+            self.plot_area_unit, self.plot_area_scale_mm2 = area_aliases[normalized_area_unit]
+
+    def _to_plot_length(self, values):
+        return np.asarray(values) / self.plot_length_scale_mm
+
+    def _to_plot_area(self, values):
+        return np.asarray(values) / self.plot_area_scale_mm2
+
+    def _to_plot_point(self, point):
+        point_array = np.asarray(point, dtype=float)
+        return tuple((point_array / self.plot_length_scale_mm).tolist())
+
+    def _length_label(self, base_label):
+        return f"{base_label} ({self.plot_length_unit})"
+
+    def _area_label(self, base_label):
+        return f"{base_label} ({self.plot_area_unit})"
+
+    def _transform_polynomial_coefficients(self, coeffs, y_scale):
+        coeffs = np.asarray(coeffs, dtype=float)
+        powers = np.arange(len(coeffs) - 1, -1, -1, dtype=float)
+        return coeffs * (self.plot_length_scale_mm ** powers) / y_scale
+
+    def _format_polynomial_equation(self, coeffs, degree_used, symbol, y_scale, r2):
+        if degree_used not in (2, 3):
+            return f"Degree {degree_used} polynomial\nR² = {r2:.6f}"
+
+        display_coeffs = self._transform_polynomial_coefficients(coeffs, y_scale)
+        if degree_used == 2:
+            return f"{symbol} = {display_coeffs[0]:.4f}x² + {display_coeffs[1]:.4f}x + {display_coeffs[2]:.2f}\nR² = {r2:.6f}"
+
+        return f"{symbol} = {display_coeffs[0]:.4f}x³ + {display_coeffs[1]:.4f}x² + {display_coeffs[2]:.4f}x + {display_coeffs[3]:.2f}\nR² = {r2:.6f}"
     
     def fit_polynomial_with_r2_threshold(self, x_data, y_data, target_r2=0.99, min_degree=2, max_degree=8):
         """
@@ -590,10 +670,11 @@ class FuelGrainRegressionSimulator:
                         
                         # Convert from OBJ units to millimeters (multiply by 1000)
                         points_2d = points_2d * 1000
+                        points_2d_plot = self._to_plot_length(points_2d)
                         
-                        ax.fill(points_2d[:, 0], points_2d[:, 1], alpha=0.4, color='lightblue', edgecolor='blue', linewidth=2.5)
-                        ax.plot(points_2d[:, 0], points_2d[:, 1], 'b-', linewidth=2.5)
-                        all_points.extend(points_2d.tolist())
+                        ax.fill(points_2d_plot[:, 0], points_2d_plot[:, 1], alpha=0.4, color='lightblue', edgecolor='blue', linewidth=2.5)
+                        ax.plot(points_2d_plot[:, 0], points_2d_plot[:, 1], 'b-', linewidth=2.5)
+                        all_points.extend(points_2d_plot.tolist())
             
             # Auto-scale to fit geometry
             if all_points:
@@ -608,9 +689,9 @@ class FuelGrainRegressionSimulator:
             
             ax.set_aspect('equal')
             ax.grid(True, alpha=0.3)
-            ax.set_xlabel('Distance (mm)', fontsize=12)
-            ax.set_ylabel('Distance (mm)', fontsize=12)
-            ax.set_title(f'OBJ Cross-Section at {axis_names[self.cross_section_axis]}={cross_pos:.3f}', fontsize=12)
+            ax.set_xlabel(self._length_label('Distance'), fontsize=12)
+            ax.set_ylabel(self._length_label('Distance'), fontsize=12)
+            ax.set_title(f'OBJ Cross-Section at {axis_names[self.cross_section_axis]}={self._to_plot_length(cross_pos):.3f} {self.plot_length_unit}', fontsize=12)
             
             plt.tight_layout()
             plt.show()
@@ -626,51 +707,53 @@ class FuelGrainRegressionSimulator:
             results: Dictionary from simulate_regression
         """
         fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-        
+
+        X_plot = self._to_plot_length(results['X'])
+        Y_plot = self._to_plot_length(results['Y'])
+        od_radius_plot = self._to_plot_length(results['od_radius'])
+        initial_id_radius_plot = self._to_plot_length(results['initial_id_radius'])
+        new_id_radius_plot = self._to_plot_length(results['new_id_radius'])
+        regression_distance_plot = self._to_plot_length(results['regression_distance'])
         # Initial geometry
         ax = axes[0]
-        im1 = ax.contourf(results['X'], results['Y'], results['initial_grid'], 
-                          levels=[0, 0.5, 1], colors=['white', 'lightblue'], alpha=0.8)
-        ax.contour(results['X'], results['Y'], results['initial_grid'], 
-                  levels=[0.5], colors=['blue'], linewidths=2)
-        
-        # Draw circles on initial
-        circle_od = plt.Circle(self.center, results['od_radius'], 
-                              fill=False, color='black', linewidth=2, label='OD (Fixed)')
-        circle_id = plt.Circle(self.center, results['initial_id_radius'], 
-                              fill=False, color='blue', linewidth=2, label='ID (Initial)')
+        ax.contourf(X_plot, Y_plot, results['initial_grid'],
+                levels=[0, 0.5, 1], colors=['white', 'lightblue'], alpha=0.8)
+        ax.contour(X_plot, Y_plot, results['initial_grid'],
+               levels=[0.5], colors=['blue'], linewidths=2)
+        circle_od = Circle(self._to_plot_point(self.center), float(od_radius_plot),
+                   fill=False, color='black', linewidth=2, label='OD (Fixed)')
+        circle_id = Circle(self._to_plot_point(self.center), float(initial_id_radius_plot),
+                   fill=False, color='blue', linewidth=2, label='ID (Initial)')
         ax.add_patch(circle_od)
         ax.add_patch(circle_id)
-        
+
         ax.set_aspect('equal')
         ax.grid(True, alpha=0.3)
-        ax.set_xlabel('X (mm)')
-        ax.set_ylabel('Y (mm)')
-        ax.set_title(f'Initial Fuel Grain\nID: {results["initial_id_radius"]:.2f} mm, OD: {results["od_radius"]:.2f} mm')
+        ax.set_xlabel(self._length_label('X'))
+        ax.set_ylabel(self._length_label('Y'))
+        ax.set_title(f'Initial Fuel Grain\nID: {initial_id_radius_plot:.2f} {self.plot_length_unit}, OD: {od_radius_plot:.2f} {self.plot_length_unit}')
         ax.legend(loc='upper right')
-        
+
         # Regressed geometry
         ax = axes[1]
-        im2 = ax.contourf(results['X'], results['Y'], results['regressed_grid'], 
-                          levels=[0, 0.5, 1], colors=['white', 'lightsalmon'], alpha=0.8)
-        ax.contour(results['X'], results['Y'], results['regressed_grid'], 
-                  levels=[0.5], colors=['red'], linewidths=2)
-        
-        # Draw circles on regressed
-        circle_od_new = plt.Circle(self.center, results['od_radius'], 
-                                  fill=False, color='black', linewidth=2, label='OD (Fixed)')
-        circle_id_new = plt.Circle(self.center, results['new_id_radius'], 
-                                  fill=False, color='red', linewidth=2, label=f'ID (After {results["regression_distance"]:.2f} mm burn)')
+        ax.contourf(X_plot, Y_plot, results['regressed_grid'],
+                levels=[0, 0.5, 1], colors=['white', 'lightsalmon'], alpha=0.8)
+        ax.contour(X_plot, Y_plot, results['regressed_grid'],
+               levels=[0.5], colors=['red'], linewidths=2)
+        circle_od_new = Circle(self._to_plot_point(self.center), float(od_radius_plot),
+                       fill=False, color='black', linewidth=2, label='OD (Fixed)')
+        circle_id_new = Circle(self._to_plot_point(self.center), float(new_id_radius_plot),
+                       fill=False, color='red', linewidth=2, label=f'ID (After {regression_distance_plot:.2f} {self.plot_length_unit} burn)')
         ax.add_patch(circle_od_new)
         ax.add_patch(circle_id_new)
-        
+
         ax.set_aspect('equal')
         ax.grid(True, alpha=0.3)
-        ax.set_xlabel('X (mm)')
-        ax.set_ylabel('Y (mm)')
-        ax.set_title(f'Fuel Grain After Regression\nID: {results["new_id_radius"]:.2f} mm, OD: {results["od_radius"]:.2f} mm')
+        ax.set_xlabel(self._length_label('X'))
+        ax.set_ylabel(self._length_label('Y'))
+        ax.set_title(f'Fuel Grain After Regression\nID: {new_id_radius_plot:.2f} {self.plot_length_unit}, OD: {od_radius_plot:.2f} {self.plot_length_unit}')
         ax.legend(loc='upper right')
-        
+
         plt.tight_layout()
         plt.show()
     
@@ -764,6 +847,9 @@ class FuelGrainRegressionSimulator:
         x = np.linspace(self.center[0] - radius_with_margin, self.center[0] + radius_with_margin, self.resolution)
         y = np.linspace(self.center[1] - radius_with_margin, self.center[1] + radius_with_margin, self.resolution)
         X, Y = np.meshgrid(x, y)
+        X_plot = self._to_plot_length(X)
+        Y_plot = self._to_plot_length(Y)
+        center_plot = self._to_plot_length(self.center)
 
         if getattr(self, "full_3d_surface_area_mm2", None) is None:
             self.full_3d_surface_area_mm2 = self.calculate_center_bore_surface_area()
@@ -788,6 +874,8 @@ class FuelGrainRegressionSimulator:
             # Area of fuel grain (in mm²)
             fuel_area = np.sum(regressed_grid) * pixel_area
             center_bore_area = self.calculate_center_bore_area(regressed_grid, X, Y)
+            fuel_area_plot = self._to_plot_area(fuel_area)
+            center_bore_area_plot = self._to_plot_area(center_bore_area)
             
             # ID Perimeter - calculate actual boundary of the inner star-shaped hole
             from skimage import measure
@@ -841,6 +929,8 @@ class FuelGrainRegressionSimulator:
                     max_radius_pixels = np.max(distance_from_boundary)
                     max_inscribed_diameter = 2 * max_radius_pixels * pixel_width
                     max_circle_radius = max_radius_pixels * pixel_width
+                    max_circle_radius_plot = self._to_plot_length(max_circle_radius)
+                    max_inscribed_diameter_plot = self._to_plot_length(max_inscribed_diameter)
                     
                     print(f"Largest hole: perimeter={inner_perimeter:.2f} mm, inscribed_radius={max_circle_radius:.2f} mm")
                     
@@ -864,17 +954,22 @@ class FuelGrainRegressionSimulator:
                         min_enclosing_center = boundary_points.mean(axis=0)
                         min_enclosing_radius = np.max(np.linalg.norm(boundary_points - min_enclosing_center, axis=1))
                         min_enclosing_diameter = 2 * min_enclosing_radius
+                        min_enclosing_radius_plot = self._to_plot_length(min_enclosing_radius)
+                        min_enclosing_diameter_plot = self._to_plot_length(min_enclosing_diameter)
                     else:
                         # Fallback if no contours found
                         min_enclosing_center = max_circle_center
                         min_enclosing_radius = max_circle_radius
                         min_enclosing_diameter = max_inscribed_diameter
+                        min_enclosing_radius_plot = max_circle_radius_plot
+                        min_enclosing_diameter_plot = max_inscribed_diameter_plot
                     
                     # Calculate circle boundary overlap (arc length where green circle touches red boundary)
                     circle_overlap = self.calculate_inscribed_circle_boundary_overlap(
                         regressed_grid, max_circle_center, max_circle_radius, pixel_width, X, Y
                     )
                     overlap_length_mm = circle_overlap
+                    overlap_length_plot = self._to_plot_length(overlap_length_mm)
             else:
                 # No significant holes found - set defaults
                 inner_perimeter = 0
@@ -886,31 +981,33 @@ class FuelGrainRegressionSimulator:
                 min_enclosing_radius = 0
                 fuel_perimeter = 0
                 overlap_length_mm = 0
+                overlap_length_plot = 0
             
             # Plot initial shape - filled
-            ax_plot.imshow(self.grid, extent=[X.min(), X.max(), Y.min(), Y.max()], 
+            ax_plot.imshow(self.grid, extent=[X_plot.min(), X_plot.max(), Y_plot.min(), Y_plot.max()], 
                           origin='lower', cmap='Blues', alpha=0.4)
             
             # Plot initial shape - contour
-            ax_plot.contour(X, Y, self.grid, levels=[0.5], colors=['blue'], 
+            ax_plot.contour(X_plot, Y_plot, self.grid, levels=[0.5], colors=['blue'], 
                            linewidths=2.5, linestyles='--')
             
             # Plot regressed shape - filled
-            ax_plot.imshow(regressed_grid, extent=[X.min(), X.max(), Y.min(), Y.max()], 
+            ax_plot.imshow(regressed_grid, extent=[X_plot.min(), X_plot.max(), Y_plot.min(), Y_plot.max()], 
                           origin='lower', cmap='Reds', alpha=0.4)
             
             # Plot regressed shape - contour
-            ax_plot.contour(X, Y, regressed_grid, levels=[0.5], colors=['red'], 
+            ax_plot.contour(X_plot, Y_plot, regressed_grid, levels=[0.5], colors=['red'], 
                            linewidths=2.5)
 
             surface_area_value = self.calculate_live_center_bore_surface_area(regressed_grid, X, Y)
             self.center_bore_surface_area_mm2 = surface_area_value
+            surface_area_value_plot = self._to_plot_area(surface_area_value)
 
             metrics_text = (
-                f'Fuel Area: {fuel_area:.2f} mm²\n'
-                f'Cross-Section Area: {center_bore_area:.2f} mm²\n'
-                f'Perimeter: {inner_perimeter:.2f} mm\n'
-                f'Bore Surface: {surface_area_value:.2f} mm²'
+                f'Fuel Area: {fuel_area_plot:.2f} {self.plot_area_unit}\n'
+                f'Cross-Section Area: {center_bore_area_plot:.2f} {self.plot_area_unit}\n'
+                f'Perimeter: {inner_perimeter:.2f} {self.plot_length_unit}\n'
+                f'Bore Surface: {surface_area_value_plot:.2f} {self.plot_area_unit}'
             )
 
             ax_plot.text(
@@ -926,14 +1023,14 @@ class FuelGrainRegressionSimulator:
             
             # Draw the largest inscribed circle if it exists
             if max_circle_center is not None and max_circle_radius > 0:
-                inscribed_circle = plt.Circle(max_circle_center, max_circle_radius, 
+                inscribed_circle = Circle(self._to_plot_point(max_circle_center), float(max_circle_radius_plot), 
                                              fill=False, color='green', linewidth=2.5, 
                                              linestyle=':', label='Max Inscribed Circle')
                 ax_plot.add_patch(inscribed_circle)
             
             # Draw the minimum enclosing circle if it exists
             if min_enclosing_center is not None and min_enclosing_radius > 0:
-                enclosing_circle = plt.Circle(min_enclosing_center, min_enclosing_radius, 
+                enclosing_circle = Circle(self._to_plot_point(min_enclosing_center), float(min_enclosing_radius_plot), 
                                              fill=False, color='orange', linewidth=2, 
                                              linestyle='-.', label='Min Enclosing Circle')
                 ax_plot.add_patch(enclosing_circle)
@@ -1014,7 +1111,7 @@ class FuelGrainRegressionSimulator:
                     
                     # Plot touching points in cyan with larger size for visibility
                     if touching_x:
-                        ax_plot.plot(touching_x, touching_y, 'c.', markersize=5, alpha=0.8, label='Contact Points')
+                        ax_plot.plot(self._to_plot_length(touching_x), self._to_plot_length(touching_y), 'c.', markersize=5, alpha=0.8, label='Contact Points')
             
             # Create manual legend entries
             from matplotlib.lines import Line2D
@@ -1028,12 +1125,12 @@ class FuelGrainRegressionSimulator:
             
             ax_plot.set_aspect('equal')
             ax_plot.grid(True, alpha=0.3)
-            ax_plot.set_xlabel('Distance (mm)', fontsize=12)
-            ax_plot.set_ylabel('Distance (mm)', fontsize=12)
+            ax_plot.set_xlabel(self._length_label('Distance'), fontsize=12)
+            ax_plot.set_ylabel(self._length_label('Distance'), fontsize=12)
             
             # Build title with largest arm info
-            largest_arm_text = f' | Largest Arm: {largest_arm_overlap:.2f} mm' if largest_arm_overlap > 0 else ''
-            ax_plot.set_title(f'Fuel Grain Regression | Time: {time_val:.2f} sec | Regression: {regression_distance:.4f} mm', 
+            largest_arm_text = f' | Largest Arm: {self._to_plot_length(largest_arm_overlap):.2f} {self.plot_length_unit}' if largest_arm_overlap > 0 else ''
+            ax_plot.set_title(f'Fuel Grain Regression | Time: {time_val:.2f} sec | Regression: {self._to_plot_length(regression_distance):.4f} {self.plot_length_unit}', 
                              fontsize=11, fontweight='bold')
             ax_plot.legend(handles=legend_elements, loc='upper right', fontsize=11)
             
@@ -1073,6 +1170,9 @@ class FuelGrainRegressionSimulator:
         # Create array of regression distances
         num_points = 100
         regression_distances = np.linspace(0, max_regression_distance, num_points)
+        regression_distances_plot = self._to_plot_length(regression_distances)
+        regression_distances_plot = self._to_plot_length(regression_distances)
+        regression_distances_plot = self._to_plot_length(regression_distances)
         
         # Array to store results
         areas = np.zeros(num_points)
@@ -1097,6 +1197,8 @@ class FuelGrainRegressionSimulator:
         # Trim arrays to valid data only
         regression_distances = regression_distances[:valid_count]
         areas = areas[:valid_count]
+        regression_distances_plot = regression_distances_plot[:valid_count]
+        areas_plot = self._to_plot_area(areas)
         
         # Fit polynomial with adaptive degree based on R² threshold
         print(f"Fitting polynomial (target R² = 0.99)...")
@@ -1104,17 +1206,18 @@ class FuelGrainRegressionSimulator:
             regression_distances, areas, target_r2=0.99, min_degree=2, max_degree=8
         )
         fit = poly(regression_distances)
+        fit_plot = self._to_plot_area(fit)
         
         # Plot the results
         fig, ax = plt.subplots(figsize=(12, 7))
         
-        ax.plot(regression_distances, areas, 'o-', linewidth=3, markersize=6, 
+        ax.plot(regression_distances_plot, areas_plot, 'o-', linewidth=3, markersize=6,
                label='Fuel Area', color='steelblue', alpha=0.7)
-        ax.plot(regression_distances, fit, '--', linewidth=2.5, color='coral', 
+        ax.plot(regression_distances_plot, fit_plot, '--', linewidth=2.5, color='coral',
                alpha=0.8, label=f'Polynomial Fit (degree {degree_used})')
         
-        ax.set_xlabel('Regression Distance (mm)', fontsize=13, fontweight='bold')
-        ax.set_ylabel('Fuel Grain Area (mm²)', fontsize=13, fontweight='bold')
+        ax.set_xlabel(self._length_label('Regression Distance'), fontsize=13, fontweight='bold')
+        ax.set_ylabel(self._area_label('Fuel Grain Area'), fontsize=13, fontweight='bold')
         ax.set_title(f'Fuel Grain Area vs Regression Distance\n{Path(self.obj_file).name}', 
                     fontsize=14, fontweight='bold')
         ax.grid(True, alpha=0.3, linestyle='--')
@@ -1125,6 +1228,9 @@ class FuelGrainRegressionSimulator:
         ax.spines['right'].set_visible(False)
         
         # Add statistics to the plot
+        if len(areas) == 0:
+            print("WARNING: No valid area data points found; skipping area plot.")
+            return np.array([0, 0, 0])
         initial_area = areas[0]
         final_area = areas[-1]
         
@@ -1137,12 +1243,12 @@ class FuelGrainRegressionSimulator:
             # Generic format for higher degrees
             eq = f"Degree {degree_used} polynomial\nR² = {r2:.6f}"
         
-        stats_text = f'Initial Area: {initial_area:.2f} mm²\n'
-        stats_text += f'Final Area: {final_area:.2f} mm²\n'
-        stats_text += f'Area Burned: {initial_area - final_area:.2f} mm²\n'
-        stats_text += f'Max Regression: {max_regression_distance:.2f} mm\n'
+        stats_text = f'Initial Area: {areas_plot[0]:.2f} {self.plot_area_unit}\n'
+        stats_text += f'Final Area: {areas_plot[-1]:.2f} {self.plot_area_unit}\n'
+        stats_text += f'Area Burned: {areas_plot[0] - areas_plot[-1]:.2f} {self.plot_area_unit}\n'
+        stats_text += f'Max Regression: {self._to_plot_length(max_regression_distance):.2f} {self.plot_length_unit}\n'
         stats_text += f'Polynomial Degree: {degree_used}\n\n'
-        stats_text += eq
+        stats_text += self._format_polynomial_equation(coeffs, degree_used, 'A', self.plot_area_scale_mm2, r2)
         
         ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=11,
                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.85),
@@ -1153,9 +1259,9 @@ class FuelGrainRegressionSimulator:
         
         # Print summary
         print(f"\nArea vs Regression Summary:")
-        print(f"  Initial area: {initial_area:.2f} mm²")
-        print(f"  Final area: {final_area:.2f} mm²")
-        print(f"  Area burned: {initial_area - final_area:.2f} mm²")
+        print(f"  Initial area: {areas_plot[0]:.2f} {self.plot_area_unit}")
+        print(f"  Final area: {areas_plot[-1]:.2f} {self.plot_area_unit}")
+        print(f"  Area burned: {areas_plot[0] - areas_plot[-1]:.2f} {self.plot_area_unit}")
         print(f"  Polynomial degree: {degree_used}")
         print(f"  R² (goodness of fit): {r2:.6f}")
         
@@ -1188,6 +1294,7 @@ class FuelGrainRegressionSimulator:
         # Create array of regression distances
         num_points = 100
         regression_distances = np.linspace(0, max_regression_distance, num_points)
+        regression_distances_plot = self._to_plot_length(regression_distances)
 
         # Array to store results
         surface_areas = np.zeros(num_points)
@@ -1211,11 +1318,14 @@ class FuelGrainRegressionSimulator:
         # Trim arrays to valid data only
         regression_distances = regression_distances[:valid_count]
         surface_areas = surface_areas[:valid_count]
+        regression_distances_plot = regression_distances_plot[:valid_count]
 
         # Remove zero surface-area points
         valid_mask = surface_areas > 0
         regression_distances = regression_distances[valid_mask]
         surface_areas = surface_areas[valid_mask]
+        regression_distances_plot = regression_distances_plot[valid_mask]
+        surface_areas_plot = self._to_plot_area(surface_areas)
 
         # Fit polynomial with adaptive degree based on R² threshold
         print(f"Fitting polynomial (target R² = 0.99)...")
@@ -1223,17 +1333,18 @@ class FuelGrainRegressionSimulator:
             regression_distances, surface_areas, target_r2=0.99, min_degree=2, max_degree=8
         )
         fit = poly(regression_distances)
+        fit_plot = self._to_plot_area(fit)
 
         # Plot the results
         fig, ax = plt.subplots(figsize=(12, 7))
 
-        ax.plot(regression_distances, surface_areas, 'o-', linewidth=3, markersize=6,
+        ax.plot(regression_distances_plot, surface_areas_plot, 'o-', linewidth=3, markersize=6,
                label='Bore Surface Area', color='teal', alpha=0.7)
-        ax.plot(regression_distances, fit, '--', linewidth=2.5, color='magenta',
+        ax.plot(regression_distances_plot, fit_plot, '--', linewidth=2.5, color='magenta',
                alpha=0.8, label=f'Polynomial Fit (degree {degree_used})')
 
-        ax.set_xlabel('Regression Distance (mm)', fontsize=13, fontweight='bold')
-        ax.set_ylabel('Bore Surface Area (mm²)', fontsize=13, fontweight='bold')
+        ax.set_xlabel(self._length_label('Regression Distance'), fontsize=13, fontweight='bold')
+        ax.set_ylabel(self._area_label('Bore Surface Area'), fontsize=13, fontweight='bold')
         ax.set_title(f'Bore Surface Area vs Regression Distance\n{Path(self.obj_file).name}',
                     fontsize=14, fontweight='bold')
         ax.grid(True, alpha=0.3, linestyle='--')
@@ -1244,6 +1355,9 @@ class FuelGrainRegressionSimulator:
         ax.spines['right'].set_visible(False)
 
         # Add statistics to the plot
+        if len(surface_areas) == 0:
+            print("WARNING: No valid surface-area data points found; skipping surface-area plot.")
+            return np.array([0, 0, 0])
         initial_surface_area = surface_areas[0]
         final_surface_area = surface_areas[-1]
 
@@ -1254,12 +1368,12 @@ class FuelGrainRegressionSimulator:
         else:
             eq = f"Degree {degree_used} polynomial\nR² = {r2:.6f}"
 
-        stats_text = f'Initial Surface Area: {initial_surface_area:.2f} mm²\n'
-        stats_text += f'Final Surface Area: {final_surface_area:.2f} mm²\n'
-        stats_text += f'Surface Area Change: {final_surface_area - initial_surface_area:.2f} mm²\n'
-        stats_text += f'Max Regression: {max_regression_distance:.2f} mm\n'
+        stats_text = f'Initial Surface Area: {surface_areas_plot[0]:.2f} {self.plot_area_unit}\n'
+        stats_text += f'Final Surface Area: {surface_areas_plot[-1]:.2f} {self.plot_area_unit}\n'
+        stats_text += f'Surface Area Change: {surface_areas_plot[-1] - surface_areas_plot[0]:.2f} {self.plot_area_unit}\n'
+        stats_text += f'Max Regression: {self._to_plot_length(max_regression_distance):.2f} {self.plot_length_unit}\n'
         stats_text += f'Polynomial Degree: {degree_used}\n\n'
-        stats_text += eq
+        stats_text += self._format_polynomial_equation(coeffs, degree_used, 'S', self.plot_area_scale_mm2, r2)
 
         ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=11,
                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lavender', alpha=0.85),
@@ -1270,9 +1384,9 @@ class FuelGrainRegressionSimulator:
 
         # Print summary
         print(f"\nBore Surface Area vs Regression Summary:")
-        print(f"  Initial surface area: {initial_surface_area:.2f} mm²")
-        print(f"  Final surface area: {final_surface_area:.2f} mm²")
-        print(f"  Surface area change: {final_surface_area - initial_surface_area:.2f} mm²")
+        print(f"  Initial surface area: {surface_areas_plot[0]:.2f} {self.plot_area_unit}")
+        print(f"  Final surface area: {surface_areas_plot[-1]:.2f} {self.plot_area_unit}")
+        print(f"  Surface area change: {surface_areas_plot[-1] - surface_areas_plot[0]:.2f} {self.plot_area_unit}")
         print(f"  Polynomial degree: {degree_used}")
         print(f"  R² (goodness of fit): {r2:.6f}")
 
@@ -1305,6 +1419,7 @@ class FuelGrainRegressionSimulator:
         # Create array of regression distances
         num_points = 100
         regression_distances = np.linspace(0, max_regression_distance, num_points)
+        regression_distances_plot = self._to_plot_length(regression_distances)
         
         # Array to store results
         perimeters = np.zeros(num_points)
@@ -1351,11 +1466,18 @@ class FuelGrainRegressionSimulator:
         # Trim arrays to valid data only
         regression_distances = regression_distances[:valid_count]
         perimeters = perimeters[:valid_count]
+        regression_distances_plot = regression_distances_plot[:valid_count]
         
         # Remove zero perimeter points
         valid_mask = perimeters > 0
         regression_distances = regression_distances[valid_mask]
         perimeters = perimeters[valid_mask]
+        regression_distances_plot = regression_distances_plot[valid_mask]
+        perimeters_plot = self._to_plot_length(perimeters)
+
+        if len(perimeters) == 0:
+            print("WARNING: No valid perimeter data points found; skipping perimeter plot.")
+            return np.array([0, 0, 0])
         
         # Fit polynomial with adaptive degree based on R² threshold
         print(f"Fitting polynomial (target R² = 0.99)...")
@@ -1363,17 +1485,18 @@ class FuelGrainRegressionSimulator:
             regression_distances, perimeters, target_r2=0.99, min_degree=2, max_degree=8
         )
         fit = poly(regression_distances)
+        fit_plot = self._to_plot_length(fit)
         
         # Plot the results
         fig, ax = plt.subplots(figsize=(12, 7))
         
-        ax.plot(regression_distances, perimeters, 'o-', linewidth=3, markersize=6,
+        ax.plot(regression_distances_plot, perimeters_plot, 'o-', linewidth=3, markersize=6,
                label='Inner Hole Perimeter', color='darkgreen', alpha=0.7)
-        ax.plot(regression_distances, fit, '--', linewidth=2.5, color='orange',
+        ax.plot(regression_distances_plot, fit_plot, '--', linewidth=2.5, color='orange',
                alpha=0.8, label=f'Polynomial Fit (degree {degree_used})')
         
-        ax.set_xlabel('Regression Distance (mm)', fontsize=13, fontweight='bold')
-        ax.set_ylabel('Inner Hole Perimeter (mm)', fontsize=13, fontweight='bold')
+        ax.set_xlabel(self._length_label('Regression Distance'), fontsize=13, fontweight='bold')
+        ax.set_ylabel(self._length_label('Inner Hole Perimeter'), fontsize=13, fontweight='bold')
         ax.set_title(f'Inner Hole Perimeter vs Regression Distance\n{Path(self.obj_file).name}',
                     fontsize=14, fontweight='bold')
         ax.grid(True, alpha=0.3, linestyle='--')
@@ -1384,6 +1507,9 @@ class FuelGrainRegressionSimulator:
         ax.spines['right'].set_visible(False)
         
         # Add statistics to the plot
+        if len(perimeters) == 0:
+            print("WARNING: No valid perimeter data points found; skipping perimeter plot.")
+            return np.array([0, 0, 0])
         initial_perimeter = perimeters[0]
         final_perimeter = perimeters[-1]
         
@@ -1395,12 +1521,12 @@ class FuelGrainRegressionSimulator:
         else:
             eq = f"Degree {degree_used} polynomial\nR² = {r2:.6f}"
         
-        stats_text = f'Initial Perimeter: {initial_perimeter:.2f} mm\n'
-        stats_text += f'Final Perimeter: {final_perimeter:.2f} mm\n'
-        stats_text += f'Perimeter Change: {final_perimeter - initial_perimeter:.2f} mm\n'
-        stats_text += f'Max Regression: {max_regression_distance:.2f} mm\n'
+        stats_text = f'Initial Perimeter: {perimeters_plot[0]:.2f} {self.plot_length_unit}\n'
+        stats_text += f'Final Perimeter: {perimeters_plot[-1]:.2f} {self.plot_length_unit}\n'
+        stats_text += f'Perimeter Change: {perimeters_plot[-1] - perimeters_plot[0]:.2f} {self.plot_length_unit}\n'
+        stats_text += f'Max Regression: {self._to_plot_length(max_regression_distance):.2f} {self.plot_length_unit}\n'
         stats_text += f'Polynomial Degree: {degree_used}\n\n'
-        stats_text += eq
+        stats_text += self._format_polynomial_equation(coeffs, degree_used, 'P', self.plot_length_scale_mm, r2)
         
         ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=11,
                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.85),
@@ -1411,9 +1537,9 @@ class FuelGrainRegressionSimulator:
         
         # Print summary
         print(f"\nPerimeter vs Regression Summary:")
-        print(f"  Initial perimeter: {initial_perimeter:.2f} mm")
-        print(f"  Final perimeter: {final_perimeter:.2f} mm")
-        print(f"  Perimeter change: {final_perimeter - initial_perimeter:.2f} mm")
+        print(f"  Initial perimeter: {perimeters_plot[0]:.2f} {self.plot_length_unit}")
+        print(f"  Final perimeter: {perimeters_plot[-1]:.2f} {self.plot_length_unit}")
+        print(f"  Perimeter change: {perimeters_plot[-1] - perimeters_plot[0]:.2f} {self.plot_length_unit}")
         print(f"  Polynomial degree: {degree_used}")
         print(f"  R² (goodness of fit): {r2:.6f}")
         
@@ -1446,6 +1572,7 @@ class FuelGrainRegressionSimulator:
         # Create array of regression distances
         num_points = 100
         regression_distances = np.linspace(0, max_regression_distance, num_points)
+        regression_distances_plot = self._to_plot_length(regression_distances)
         
         # Array to store results
         max_inscribed_diameters = np.zeros(num_points)
@@ -1486,11 +1613,14 @@ class FuelGrainRegressionSimulator:
         # Trim arrays to valid data only
         regression_distances = regression_distances[:valid_count]
         max_inscribed_diameters = max_inscribed_diameters[:valid_count]
+        regression_distances_plot = regression_distances_plot[:valid_count]
         
         # Remove zero diameter points
         valid_mask = max_inscribed_diameters > 0
         regression_distances = regression_distances[valid_mask]
         max_inscribed_diameters = max_inscribed_diameters[valid_mask]
+        regression_distances_plot = regression_distances_plot[valid_mask]
+        max_inscribed_diameters_plot = self._to_plot_length(max_inscribed_diameters)
         
         # Fit polynomial with adaptive degree based on R² threshold
         print(f"Fitting polynomial (target R² = 0.99)...")
@@ -1498,17 +1628,18 @@ class FuelGrainRegressionSimulator:
             regression_distances, max_inscribed_diameters, target_r2=0.99, min_degree=2, max_degree=8
         )
         fit = poly(regression_distances)
+        fit_plot = self._to_plot_length(fit)
         
         # Plot the results
         fig, ax = plt.subplots(figsize=(12, 7))
         
-        ax.plot(regression_distances, max_inscribed_diameters, 'o-', linewidth=3, markersize=6,
+        ax.plot(regression_distances_plot, max_inscribed_diameters_plot, 'o-', linewidth=3, markersize=6,
                label='Max Inscribed Circle Diameter', color='darkblue', alpha=0.7)
-        ax.plot(regression_distances, fit, '--', linewidth=2.5, color='cyan',
+        ax.plot(regression_distances_plot, fit_plot, '--', linewidth=2.5, color='cyan',
                alpha=0.8, label=f'Polynomial Fit (degree {degree_used})')
         
-        ax.set_xlabel('Regression Distance (mm)', fontsize=13, fontweight='bold')
-        ax.set_ylabel('Max Inscribed Circle Diameter (mm)', fontsize=13, fontweight='bold')
+        ax.set_xlabel(self._length_label('Regression Distance'), fontsize=13, fontweight='bold')
+        ax.set_ylabel(self._length_label('Max Inscribed Circle Diameter'), fontsize=13, fontweight='bold')
         ax.set_title(f'Max Inscribed Circle Diameter vs Regression Distance\n{Path(self.obj_file).name}',
                     fontsize=14, fontweight='bold')
         ax.grid(True, alpha=0.3, linestyle='--')
@@ -1519,6 +1650,9 @@ class FuelGrainRegressionSimulator:
         ax.spines['right'].set_visible(False)
         
         # Add statistics to the plot
+        if len(max_inscribed_diameters) == 0:
+            print("WARNING: No valid max-inscribed data points found; skipping max-inscribed plot.")
+            return np.array([0, 0, 0])
         initial_max_inscribed = max_inscribed_diameters[0]
         final_max_inscribed = max_inscribed_diameters[-1]
         
@@ -1530,12 +1664,12 @@ class FuelGrainRegressionSimulator:
         else:
             eq = f"Degree {degree_used} polynomial\nR² = {r2:.6f}"
         
-        stats_text = f'Initial Max Inscribed: {initial_max_inscribed:.2f} mm\n'
-        stats_text += f'Final Max Inscribed: {final_max_inscribed:.2f} mm\n'
-        stats_text += f'Diameter Change: {final_max_inscribed - initial_max_inscribed:.2f} mm\n'
-        stats_text += f'Max Regression: {max_regression_distance:.2f} mm\n'
+        stats_text = f'Initial Max Inscribed: {max_inscribed_diameters_plot[0]:.2f} {self.plot_length_unit}\n'
+        stats_text += f'Final Max Inscribed: {max_inscribed_diameters_plot[-1]:.2f} {self.plot_length_unit}\n'
+        stats_text += f'Diameter Change: {max_inscribed_diameters_plot[-1] - max_inscribed_diameters_plot[0]:.2f} {self.plot_length_unit}\n'
+        stats_text += f'Max Regression: {self._to_plot_length(max_regression_distance):.2f} {self.plot_length_unit}\n'
         stats_text += f'Polynomial Degree: {degree_used}\n\n'
-        stats_text += eq
+        stats_text += self._format_polynomial_equation(coeffs, degree_used, 'D', self.plot_length_scale_mm, r2)
         
         ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=11,
                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightcyan', alpha=0.85),
@@ -1546,9 +1680,9 @@ class FuelGrainRegressionSimulator:
         
         # Print summary
         print(f"\nMax Inscribed Circle vs Regression Summary:")
-        print(f"  Initial diameter: {initial_max_inscribed:.2f} mm")
-        print(f"  Final diameter: {final_max_inscribed:.2f} mm")
-        print(f"  Diameter change: {final_max_inscribed - initial_max_inscribed:.2f} mm")
+        print(f"  Initial diameter: {max_inscribed_diameters_plot[0]:.2f} {self.plot_length_unit}")
+        print(f"  Final diameter: {max_inscribed_diameters_plot[-1]:.2f} {self.plot_length_unit}")
+        print(f"  Diameter change: {max_inscribed_diameters_plot[-1] - max_inscribed_diameters_plot[0]:.2f} {self.plot_length_unit}")
         print(f"  Polynomial degree: {degree_used}")
         print(f"  R² (goodness of fit): {r2:.6f}")
         
@@ -1581,6 +1715,7 @@ class FuelGrainRegressionSimulator:
         # Create array of regression distances
         num_points = 100
         regression_distances = np.linspace(0, max_regression_distance, num_points)
+        regression_distances_plot = self._to_plot_length(regression_distances)
         
         # Array to store results
         min_enclosing_diameters = np.zeros(num_points)
@@ -1631,11 +1766,14 @@ class FuelGrainRegressionSimulator:
         # Trim arrays to valid data only
         regression_distances = regression_distances[:valid_count]
         min_enclosing_diameters = min_enclosing_diameters[:valid_count]
+        regression_distances_plot = regression_distances_plot[:valid_count]
         
         # Remove zero diameter points
         valid_mask = min_enclosing_diameters > 0
         regression_distances = regression_distances[valid_mask]
         min_enclosing_diameters = min_enclosing_diameters[valid_mask]
+        regression_distances_plot = regression_distances_plot[valid_mask]
+        min_enclosing_diameters_plot = self._to_plot_length(min_enclosing_diameters)
         
         # Fit polynomial with adaptive degree based on R² threshold
         print(f"Fitting polynomial (target R² = 0.99)...")
@@ -1643,17 +1781,18 @@ class FuelGrainRegressionSimulator:
             regression_distances, min_enclosing_diameters, target_r2=0.99, min_degree=2, max_degree=8
         )
         fit = poly(regression_distances)
+        fit_plot = self._to_plot_length(fit)
         
         # Plot the results
         fig, ax = plt.subplots(figsize=(12, 7))
         
-        ax.plot(regression_distances, min_enclosing_diameters, 'o-', linewidth=3, markersize=6,
+        ax.plot(regression_distances_plot, min_enclosing_diameters_plot, 'o-', linewidth=3, markersize=6,
                label='Min Enclosing Circle Diameter', color='darkgreen', alpha=0.7)
-        ax.plot(regression_distances, fit, '--', linewidth=2.5, color='lightgreen',
+        ax.plot(regression_distances_plot, fit_plot, '--', linewidth=2.5, color='lightgreen',
                alpha=0.8, label=f'Polynomial Fit (degree {degree_used})')
         
-        ax.set_xlabel('Regression Distance (mm)', fontsize=13, fontweight='bold')
-        ax.set_ylabel('Min Enclosing Circle Diameter (mm)', fontsize=13, fontweight='bold')
+        ax.set_xlabel(self._length_label('Regression Distance'), fontsize=13, fontweight='bold')
+        ax.set_ylabel(self._length_label('Min Enclosing Circle Diameter'), fontsize=13, fontweight='bold')
         ax.set_title(f'Min Enclosing Circle Diameter vs Regression Distance\n{Path(self.obj_file).name}',
                     fontsize=14, fontweight='bold')
         ax.grid(True, alpha=0.3, linestyle='--')
@@ -1664,6 +1803,9 @@ class FuelGrainRegressionSimulator:
         ax.spines['right'].set_visible(False)
         
         # Add statistics to the plot
+        if len(min_enclosing_diameters) == 0:
+            print("WARNING: No valid min-enclosing data points found; skipping min-enclosing plot.")
+            return np.array([0, 0, 0])
         initial_min_enclosing = min_enclosing_diameters[0]
         final_min_enclosing = min_enclosing_diameters[-1]
         
@@ -1675,12 +1817,12 @@ class FuelGrainRegressionSimulator:
         else:
             eq = f"Degree {degree_used} polynomial\nR² = {r2:.6f}"
         
-        stats_text = f'Initial Min Enclosing: {initial_min_enclosing:.2f} mm\n'
-        stats_text += f'Final Min Enclosing: {final_min_enclosing:.2f} mm\n'
-        stats_text += f'Diameter Change: {final_min_enclosing - initial_min_enclosing:.2f} mm\n'
-        stats_text += f'Max Regression: {max_regression_distance:.2f} mm\n'
+        stats_text = f'Initial Min Enclosing: {min_enclosing_diameters_plot[0]:.2f} {self.plot_length_unit}\n'
+        stats_text += f'Final Min Enclosing: {min_enclosing_diameters_plot[-1]:.2f} {self.plot_length_unit}\n'
+        stats_text += f'Diameter Change: {min_enclosing_diameters_plot[-1] - min_enclosing_diameters_plot[0]:.2f} {self.plot_length_unit}\n'
+        stats_text += f'Max Regression: {self._to_plot_length(max_regression_distance):.2f} {self.plot_length_unit}\n'
         stats_text += f'Polynomial Degree: {degree_used}\n\n'
-        stats_text += eq
+        stats_text += self._format_polynomial_equation(coeffs, degree_used, 'D', self.plot_length_scale_mm, r2)
         
         ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=11,
                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.85),
@@ -1691,9 +1833,9 @@ class FuelGrainRegressionSimulator:
         
         # Print summary
         print(f"\nMin Enclosing Circle vs Regression Summary:")
-        print(f"  Initial diameter: {initial_min_enclosing:.2f} mm")
-        print(f"  Final diameter: {final_min_enclosing:.2f} mm")
-        print(f"  Diameter change: {final_min_enclosing - initial_min_enclosing:.2f} mm")
+        print(f"  Initial diameter: {min_enclosing_diameters_plot[0]:.2f} {self.plot_length_unit}")
+        print(f"  Final diameter: {min_enclosing_diameters_plot[-1]:.2f} {self.plot_length_unit}")
+        print(f"  Diameter change: {min_enclosing_diameters_plot[-1] - min_enclosing_diameters_plot[0]:.2f} {self.plot_length_unit}")
         print(f"  Polynomial degree: {degree_used}")
         print(f"  R² (goodness of fit): {r2:.6f}")
         
@@ -1725,6 +1867,7 @@ class FuelGrainRegressionSimulator:
         # Create array of regression distances
         num_points = 100
         regression_distances = np.linspace(0, max_regression_distance, num_points)
+        regression_distances_plot = self._to_plot_length(regression_distances)
         
         # Array to store results
         overlaps = np.zeros(num_points)
@@ -1779,6 +1922,7 @@ class FuelGrainRegressionSimulator:
         # Trim arrays to valid data only
         regression_distances = regression_distances[:valid_count]
         overlaps = overlaps[:valid_count]
+        regression_distances_plot = regression_distances_plot[:valid_count]
         
         # Apply Savitzky-Golay filter to smooth noise
         if len(overlaps) >= 5:
@@ -1790,6 +1934,8 @@ class FuelGrainRegressionSimulator:
             overlaps_smooth = savgol_filter(overlaps, window_length=window_length, polyorder=3)
         else:
             overlaps_smooth = overlaps
+        overlaps_plot = self._to_plot_length(overlaps)
+        overlaps_smooth_plot = self._to_plot_length(overlaps_smooth)
         
         # Filter out invalid and near-zero data points before fitting
         # Keep only finite values and values above a minimum threshold (1% of max)
@@ -1819,19 +1965,20 @@ class FuelGrainRegressionSimulator:
                 x_filtered, y_filtered, target_r2=0.99, min_degree=2, max_degree=8
             )
             fit = poly(regression_distances)
+        fit_plot = self._to_plot_length(fit)
         
         # Plot the results
         fig, ax = plt.subplots(figsize=(12, 7))
         
-        ax.plot(regression_distances, overlaps, 'o-', linewidth=2, markersize=4, 
+        ax.plot(regression_distances_plot, overlaps_plot, 'o-', linewidth=2, markersize=4,
                label='Raw Measurement', color='lightblue', alpha=0.5)
-        ax.plot(regression_distances, overlaps_smooth, 's-', linewidth=2.5, markersize=5,
+        ax.plot(regression_distances_plot, overlaps_smooth_plot, 's-', linewidth=2.5, markersize=5,
                label='Smoothed Data', color='darkblue', alpha=0.8)
-        ax.plot(regression_distances, fit, '--', linewidth=2.5, color='cyan', 
+        ax.plot(regression_distances_plot, fit_plot, '--', linewidth=2.5, color='cyan',
                alpha=0.8, label=f'Polynomial Fit (degree {degree_used})')
         
-        ax.set_xlabel('Regression Distance (mm)', fontsize=13, fontweight='bold')
-        ax.set_ylabel('Circle Boundary Overlap (mm)', fontsize=13, fontweight='bold')
+        ax.set_xlabel(self._length_label('Regression Distance'), fontsize=13, fontweight='bold')
+        ax.set_ylabel(self._length_label('Circle Boundary Overlap'), fontsize=13, fontweight='bold')
         ax.set_title(f'Inscribed Circle Boundary Overlap vs Regression Distance\n{Path(self.obj_file).name}', 
                     fontsize=14, fontweight='bold')
         ax.grid(True, alpha=0.3, linestyle='--')
@@ -1842,6 +1989,9 @@ class FuelGrainRegressionSimulator:
         ax.spines['right'].set_visible(False)
         
         # Add statistics to the plot
+        if len(overlaps) == 0:
+            print("WARNING: No valid circle-overlap data points found; skipping circle-overlap plot.")
+            return np.array([0, 0, 0])
         initial_overlap = overlaps[0]
         final_overlap = overlaps[-1]
         
@@ -1853,12 +2003,12 @@ class FuelGrainRegressionSimulator:
         else:
             eq = f"Degree {degree_used} polynomial\nR² = {r2:.6f}"
         
-        stats_text = f'Initial Overlap: {initial_overlap:.2f} mm\n'
-        stats_text += f'Final Overlap: {final_overlap:.2f} mm\n'
-        stats_text += f'Overlap Change: {final_overlap - initial_overlap:.2f} mm\n'
-        stats_text += f'Max Regression: {max_regression_distance:.2f} mm\n'
+        stats_text = f'Initial Overlap: {overlaps_plot[0]:.2f} {self.plot_length_unit}\n'
+        stats_text += f'Final Overlap: {overlaps_plot[-1]:.2f} {self.plot_length_unit}\n'
+        stats_text += f'Overlap Change: {overlaps_plot[-1] - overlaps_plot[0]:.2f} {self.plot_length_unit}\n'
+        stats_text += f'Max Regression: {self._to_plot_length(max_regression_distance):.2f} {self.plot_length_unit}\n'
         stats_text += f'Polynomial Degree: {degree_used}\n\n'
-        stats_text += eq
+        stats_text += self._format_polynomial_equation(coeffs, degree_used, 'L', self.plot_length_scale_mm, r2)
         
         ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=11,
                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightcyan', alpha=0.85),
@@ -1869,9 +2019,9 @@ class FuelGrainRegressionSimulator:
         
         # Print summary
         print(f"\nCircle Boundary Overlap vs Regression Summary:")
-        print(f"  Initial overlap: {initial_overlap:.2f} mm")
-        print(f"  Final overlap: {final_overlap:.2f} mm")
-        print(f"  Overlap change: {final_overlap - initial_overlap:.2f} mm")
+        print(f"  Initial overlap: {overlaps_plot[0]:.2f} {self.plot_length_unit}")
+        print(f"  Final overlap: {overlaps_plot[-1]:.2f} {self.plot_length_unit}")
+        print(f"  Overlap change: {overlaps_plot[-1] - overlaps_plot[0]:.2f} {self.plot_length_unit}")
         print(f"  Polynomial degree: {degree_used}")
         print(f"  R² (goodness of fit): {r2:.6f}")
         
@@ -1905,6 +2055,7 @@ class FuelGrainRegressionSimulator:
         # Create array of regression distances
         num_points = 100
         regression_distances = np.linspace(0, max_regression_distance, num_points)
+        regression_distances_plot = self._to_plot_length(regression_distances)
         
         # Array to store results
         largest_arm_overlaps = np.zeros(num_points)
@@ -2015,11 +2166,14 @@ class FuelGrainRegressionSimulator:
         # Trim arrays to valid data only
         regression_distances = regression_distances[:valid_count]
         largest_arm_overlaps = largest_arm_overlaps[:valid_count]
+        regression_distances_plot = regression_distances_plot[:valid_count]
         
         # Remove zero overlap points
         valid_mask = largest_arm_overlaps > 0
         regression_distances = regression_distances[valid_mask]
         largest_arm_overlaps = largest_arm_overlaps[valid_mask]
+        regression_distances_plot = regression_distances_plot[valid_mask]
+        largest_arm_overlaps_plot = self._to_plot_length(largest_arm_overlaps)
         
         if len(regression_distances) < 3:
             print("Not enough data points for curve fitting - returning zero coefficients")
@@ -2034,6 +2188,7 @@ class FuelGrainRegressionSimulator:
             overlaps_smooth = savgol_filter(largest_arm_overlaps, window_length=window_length, polyorder=3)
         else:
             overlaps_smooth = largest_arm_overlaps
+        overlaps_smooth_plot = self._to_plot_length(overlaps_smooth)
         
         # Filter out invalid and near-zero data points before fitting
         # Keep only finite values and values above a minimum threshold (1% of max)
@@ -2063,19 +2218,20 @@ class FuelGrainRegressionSimulator:
                 x_filtered, y_filtered, target_r2=0.99, min_degree=2, max_degree=8
             )
             fit = poly(regression_distances)
+        fit_plot = self._to_plot_length(fit)
         
         # Plot the results
         fig, ax = plt.subplots(figsize=(12, 7))
         
-        ax.plot(regression_distances, largest_arm_overlaps, 'o-', linewidth=2, markersize=4, 
+        ax.plot(regression_distances_plot, largest_arm_overlaps_plot, 'o-', linewidth=2, markersize=4,
                label='Raw Measurement', color='lightcoral', alpha=0.5)
-        ax.plot(regression_distances, overlaps_smooth, 's-', linewidth=2.5, markersize=5,
+        ax.plot(regression_distances_plot, overlaps_smooth_plot, 's-', linewidth=2.5, markersize=5,
                label='Smoothed Data', color='darkred', alpha=0.8)
-        ax.plot(regression_distances, fit, '--', linewidth=2.5, color='gold', 
+        ax.plot(regression_distances_plot, fit_plot, '--', linewidth=2.5, color='gold',
                alpha=0.8, label=f'Polynomial Fit (degree {degree_used})')
         
-        ax.set_xlabel('Regression Distance (mm)', fontsize=13, fontweight='bold')
-        ax.set_ylabel('Largest Arm Contact Arc Length (mm)', fontsize=13, fontweight='bold')
+        ax.set_xlabel(self._length_label('Regression Distance'), fontsize=13, fontweight='bold')
+        ax.set_ylabel(self._length_label('Largest Arm Contact Arc Length'), fontsize=13, fontweight='bold')
         ax.set_title(f'Largest Extrusion Arm Contact Length vs Regression Distance\n{Path(self.obj_file).name}', 
                     fontsize=14, fontweight='bold')
         ax.grid(True, alpha=0.3, linestyle='--')
@@ -2086,6 +2242,9 @@ class FuelGrainRegressionSimulator:
         ax.spines['right'].set_visible(False)
         
         # Add statistics to the plot
+        if len(largest_arm_overlaps) == 0:
+            print("WARNING: No valid largest-arm data points found; skipping largest-arm plot.")
+            return np.array([0, 0, 0])
         initial_overlap = largest_arm_overlaps[0]
         final_overlap = largest_arm_overlaps[-1]
         
@@ -2097,12 +2256,12 @@ class FuelGrainRegressionSimulator:
         else:
             eq = f"Degree {degree_used} polynomial\nR² = {r2:.6f}"
         
-        stats_text = f'Initial Arm Contact: {initial_overlap:.2f} mm\n'
-        stats_text += f'Final Arm Contact: {final_overlap:.2f} mm\n'
-        stats_text += f'Contact Change: {final_overlap - initial_overlap:.2f} mm\n'
-        stats_text += f'Max Regression: {max_regression_distance:.2f} mm\n'
+        stats_text = f'Initial Arm Contact: {largest_arm_overlaps_plot[0]:.2f} {self.plot_length_unit}\n'
+        stats_text += f'Final Arm Contact: {largest_arm_overlaps_plot[-1]:.2f} {self.plot_length_unit}\n'
+        stats_text += f'Contact Change: {largest_arm_overlaps_plot[-1] - largest_arm_overlaps_plot[0]:.2f} {self.plot_length_unit}\n'
+        stats_text += f'Max Regression: {self._to_plot_length(max_regression_distance):.2f} {self.plot_length_unit}\n'
         stats_text += f'Polynomial Degree: {degree_used}\n\n'
-        stats_text += eq
+        stats_text += self._format_polynomial_equation(coeffs, degree_used, 'L', self.plot_length_scale_mm, r2)
         
         ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=11,
                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='mistyrose', alpha=0.85),
@@ -2113,9 +2272,9 @@ class FuelGrainRegressionSimulator:
         
         # Print summary
         print(f"\nLargest Arm Contact Length vs Regression Summary:")
-        print(f"  Initial contact: {initial_overlap:.2f} mm")
-        print(f"  Final contact: {final_overlap:.2f} mm")
-        print(f"  Contact change: {final_overlap - initial_overlap:.2f} mm")
+        print(f"  Initial contact: {largest_arm_overlaps_plot[0]:.2f} {self.plot_length_unit}")
+        print(f"  Final contact: {largest_arm_overlaps_plot[-1]:.2f} {self.plot_length_unit}")
+        print(f"  Contact change: {largest_arm_overlaps_plot[-1] - largest_arm_overlaps_plot[0]:.2f} {self.plot_length_unit}")
         print(f"  Polynomial degree: {degree_used}")
         print(f"  R² (goodness of fit): {r2:.6f}")
         
@@ -2130,6 +2289,8 @@ def main():
     regression_rate = 3  # mm/sec
     time_seconds = 40  # seconds
     cross_section_axis = 1 # 0=X, 1=Y, 2=Z (Z is top-down view)
+    plot_length_unit = 'in'  # Change to 'cm', 'm', or 'in' for graph display only
+    plot_area_unit = None  # Leave as None to derive area units from plot_length_unit
     
     # Check if OBJ file exists
     if not Path(obj_file).exists():
@@ -2139,7 +2300,8 @@ def main():
     
     # Create simulator and run
     simulator = FuelGrainRegressionSimulator(obj_file, outer_diameter_inches=outer_diameter_inches, 
-                                            resolution=500, cross_section_axis=cross_section_axis)
+                                            resolution=500, cross_section_axis=cross_section_axis,
+                                            plot_length_unit=plot_length_unit, plot_area_unit=plot_area_unit)
     
     print("\n" + "="*60)
     print("Fuel Grain Regression Simulator (OBJ-based)")

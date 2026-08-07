@@ -20,6 +20,7 @@ class Oxtank():
         self.Den_Liquid=None
         self.Vapour_PressurePa=None
         self.VapourPressure_PSI=None
+        self.t_press=None
         self.Den_Total=None
         self.gammanitrous=None
         self.fluid_Cp=None
@@ -206,6 +207,7 @@ class Oxtank():
         self.Vent_happen=isventopen
         self.Use_internal_energy_change=True
         self.calvent=True
+
         
 
         
@@ -353,6 +355,7 @@ class Oxtank():
         self.liquidmassold=self.t_liquidmassnew
         self.Vapourmass=self.t_vapourmass
         self.Oxtanktemp=self.t_Oxtanktemp
+        self.t_press=PropsSI('P', 'D', self.nitrousTankDen, 'U', self.spec_interanl_energy_u, 'NitrousOxide')
 
          
     def FindVapour(self,ventcd,ventarea,ambientpressure_pa):

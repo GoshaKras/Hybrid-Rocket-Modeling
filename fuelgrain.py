@@ -23,7 +23,7 @@ from fuel_grain_regression2 import FuelGrainRegressionSimulator
 
 
 class FuelGrain():
-    def __init__(self,FuelGrainDiameter,fuelGrain_AreaReal,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,HowmuchInj_Help,Is_fuelGrain_Helix,helixrundiameter,Is_fuelgrain_Transient,Is_start_mass_gas_input,StartMass_Gas,Is_FuelGrain_GoshaStar,OneArchlengthestimate,preccandpostvolume,start_gas_gpermole,RealTime,Is_FuelGrain_PixelMethod,helixloopdiameter):
+    def __init__(self,FuelGrainDiameter,fuelGrain_AreaReal,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,HowmuchInj_Help,Is_fuelGrain_Helix,helixrundiameter,Is_fuelgrain_Transient,Is_start_mass_gas_input,StartMass_Gas,Is_FuelGrain_GoshaStar,OneArchlengthestimate,preccandpostvolume,start_gas_gpermole,RealTime,Is_FuelGrain_PixelMethod,helixloopdiameter,plot_length_unit='mm',plot_area_unit=None):
         
         self.time=RealTime
         self.diameter_grain=FuelGrainDiameter
@@ -176,6 +176,8 @@ class FuelGrain():
             self.arclengthdiffernce=None
             self.ratio_touchedByhelix=None
             self.p_helixloopdiameter=helixloopdiameter
+            self.plot_length_unit = plot_length_unit
+            self.plot_area_unit = plot_area_unit
             
         
             
@@ -198,8 +200,11 @@ class FuelGrain():
         self.Is_helix=Is_fuelGrain_Helix
         self.OuterDiameter_inches=outerdiameter_inches
         self.Areabasedon_OuterDiameter_mm=( ( (outerdiameter_inches*25.4)/2 )**2 )*3.14
+        
+        
         self.oldarea_p=totalComplexArea
         self.fuelregcon=0
+        self.OGHD=self.diameter_grain
         if Is_fuelGrain_Helix==True:
             self.helixlength_meters=revPitch*np.sqrt(((self.helixloopdiameter*3.14)**2)+(PitchFor_Helix)**2) 
             self.HelixP_meters=(self.helixlength_meters/revPitch)
@@ -425,6 +430,7 @@ class FuelGrain():
         self.pixelAREA = np.polyval(area_coeffs, x)
         self.pixelAREA = max(0, self.pixelAREA)  # Ensure non-negative
         self.pixelAREA=(self.Areabasedon_OuterDiameter_mm - self.pixelAREA)/(1000*1000)  # Subtract from initial area based on OD
+      
         if self.time>Timestep:
             self.oldarea2=self.P_eqraduis*self.P_eqraduis*3.14
             self.P_eqraduis+=self.regression_M_persec*Timestep
@@ -493,7 +499,7 @@ class FuelGrain():
        # if Is_fuelGrain_Helix==True:
            # self.insurfacearea = self.insurfacearea + self.surfaceareaadd
 
-    def run_regression_analysis(self, obj_file_path, regression_rate=3.0, time_seconds=30, cross_section_axis=2, show_plots=True):
+    def run_regression_analysis(self, obj_file_path, regression_rate=3.0, time_seconds=30, cross_section_axis=2, show_plots=True, plot_length_unit=None, plot_area_unit=None):
         """
         Run full fuel grain regression analysis with all graphs and curve fits.
         This will display area, perimeter, and inscribed circle diameter graphs.
@@ -519,7 +525,9 @@ class FuelGrain():
             obj_file_path,
             outer_diameter_inches=self.OuterDiameter_inches,
             resolution=500,
-            cross_section_axis=cross_section_axis
+            cross_section_axis=cross_section_axis,
+            plot_length_unit=self.plot_length_unit if plot_length_unit is None else plot_length_unit,
+            plot_area_unit=self.plot_area_unit if plot_area_unit is None else plot_area_unit
         )
         
         print("\n" + "="*60)
