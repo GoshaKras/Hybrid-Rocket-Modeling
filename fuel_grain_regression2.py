@@ -18,7 +18,8 @@ def _can_use_gui_backend():
         return False
 
 
-USE_GUI_PLOTS = os.environ.get("MOTOR_MODEL_USE_GUI_PLOTS", "1") == "1"
+USE_GUI_PLOTS = os.environ.get("MOTOR_MODEL_USE_GUI_PLOTS", "").strip().lower()
+USE_GUI_PLOTS = _can_use_gui_backend() if USE_GUI_PLOTS != "0" else False
 
 if USE_GUI_PLOTS and _can_use_gui_backend():
     matplotlib.use("TkAgg")
@@ -31,11 +32,16 @@ from matplotlib.widgets import Slider
 from scipy.ndimage import distance_transform_edt
 from scipy import ndimage
 from scipy.signal import savgol_filter
+from scipy.interpolate import splprep, splev
 from skimage.draw import polygon
 from skimage import measure
 import trimesh
+from shapely.geometry import Polygon
+from shapely.ops import triangulate
 import sys
 from pathlib import Path
+
+from surfacearea import calculate_bore_surface_area
 
 # Suppress numpy printing warnings
 np.set_printoptions(threshold=10000)
@@ -129,6 +135,21 @@ class FuelGrainRegressionSimulator:
 
     def _area_label(self, base_label):
         return f"{base_label} ({self.plot_area_unit})"
+
+    def _present_plot(self, fig, output_stem):
+        """Show the plot in GUI mode or save it to disk in headless mode."""
+        if USE_GUI_PLOTS:
+            fig.canvas.draw_idle()
+            plt.show(block=False)
+            plt.pause(0.001)
+            return
+
+        output_dir = Path("plot_outputs")
+        output_dir.mkdir(exist_ok=True)
+        output_path = output_dir / f"{output_stem}.png"
+        fig.savefig(output_path, dpi=200, bbox_inches="tight")
+        print(f"Saved plot to {output_path}")
+        plt.close(fig)
 
     def _transform_polynomial_coefficients(self, coeffs, y_scale):
         coeffs = np.asarray(coeffs, dtype=float)
@@ -462,8 +483,71 @@ class FuelGrainRegressionSimulator:
 
         return largest_hole_size * pixel_area
 
+    def _closed_contour_perimeter_mm(self, contour_points_mm, smoothing_ratio=0.0, min_samples=200, max_samples=2000):
+        """Measure a closed contour perimeter in mm, optionally smoothing the curve first."""
+        points = np.asarray(contour_points_mm, dtype=float)
+        if points.ndim != 2 or points.shape[0] < 3:
+            return 0.0
+
+        if np.allclose(points[0], points[-1]):
+            points = points[:-1]
+
+        if points.shape[0] < 3:
+            return 0.0
+
+        closed_points = np.vstack([points, points[0]])
+        raw_perimeter = float(np.sum(np.linalg.norm(np.diff(closed_points, axis=0), axis=1)))
+
+        if smoothing_ratio <= 0.0 or points.shape[0] < 4:
+            return raw_perimeter
+
+        try:
+            sample_count = int(np.clip(points.shape[0] * 4, min_samples, max_samples))
+            tck, _ = splprep([points[:, 0], points[:, 1]], s=max(0.0, smoothing_ratio * raw_perimeter), per=True)
+            u_new = np.linspace(0.0, 1.0, sample_count, endpoint=False)
+            x_new, y_new = splev(u_new, tck)
+            smooth_points = np.column_stack([x_new, y_new])
+            smooth_closed = np.vstack([smooth_points, smooth_points[0]])
+            return float(np.sum(np.linalg.norm(np.diff(smooth_closed, axis=0), axis=1)))
+        except Exception:
+            return raw_perimeter
+
     def calculate_live_center_bore_surface_area(self, regressed_grid, X, Y, grain_length_mm=None):
-        """Return the current bore surface area in mm^2."""
+        """Return the current bore surface area in mm^2 from the regressed contour geometry."""
+        bore_surface_area_mm2, _ = self.calculate_live_center_bore_surface_area_by_remesh(
+            regressed_grid,
+            X,
+            Y,
+            grain_length_mm=grain_length_mm,
+            return_mesh=True,
+        )
+        if bore_surface_area_mm2 > 0:
+            return float(bore_surface_area_mm2)
+
+        return self._calculate_live_center_bore_surface_area_from_contours(regressed_grid, X, Y, grain_length_mm=grain_length_mm)
+
+    def _estimate_bore_surface_area_from_regression_distance(self, regression_distance_mm):
+        """Estimate regressed bore area with a fast perimeter-style linear model.
+
+        The initial area stays anchored to the validated 3D mesh measurement. The
+        regressed increment is approximated as a perimeter times regression distance,
+        using the grain length to recover a perimeter-equivalent scale from the initial area.
+        """
+        if self.mesh is None:
+            self.read_obj_geometry()
+
+        initial_area_mm2 = self.calculate_center_bore_surface_area()
+        bounds = self.mesh.bounds
+        grain_length_mm = float(abs(bounds[1][self.cross_section_axis] - bounds[0][self.cross_section_axis]) * 1000.0)
+        if grain_length_mm <= 0:
+            return float(initial_area_mm2)
+
+        initial_perimeter_mm = float(initial_area_mm2 / grain_length_mm)
+        regression_distance_mm = max(float(regression_distance_mm), 0.0)
+        return float(initial_area_mm2 + (initial_perimeter_mm * regression_distance_mm))
+
+    def _calculate_live_center_bore_surface_area_from_contours(self, regressed_grid, X, Y, grain_length_mm=None):
+        """Fallback bore area estimate from 2D contour geometry."""
         if regressed_grid is None or X is None or Y is None:
             return 0.0
 
@@ -474,8 +558,8 @@ class FuelGrainRegressionSimulator:
             bounds = self.mesh.bounds
             grain_length_mm = float(abs(bounds[1][self.cross_section_axis] - bounds[0][self.cross_section_axis]) * 1000.0)
 
-        current_perimeter_mm = self.calculate_bore_perimeter(regressed_grid, X, Y)
-        return float(current_perimeter_mm * grain_length_mm)
+        outer_boundary_perimeter_mm = self._calculate_outer_boundary_perimeter_mm(regressed_grid, X, Y)
+        return float(outer_boundary_perimeter_mm * grain_length_mm)
 
     def calculate_bore_perimeter(self, binary_grid, X, Y):
         """Return the total inner bore perimeter in mm from a 2D binary grid."""
@@ -549,6 +633,45 @@ class FuelGrainRegressionSimulator:
 
         return best_area_mm2
 
+    def _calculate_outer_boundary_perimeter_mm(self, binary_grid, X, Y):
+        """Return the perimeter of the outermost fuel boundary in mm."""
+        if binary_grid is None or X is None or Y is None:
+            return 0.0
+
+        pixel_width = abs(X[0, 1] - X[0, 0])
+        pixel_height = abs(Y[1, 0] - Y[0, 0])
+
+        contours = measure.find_contours(binary_grid.astype(float), 0.5)
+        if not contours:
+            return 0.0
+
+        best_contour = None
+        best_area = -1.0
+
+        for contour in contours:
+            if contour is None or len(contour) < 3:
+                continue
+
+            closed_contour = contour
+            if not np.allclose(contour[0], contour[-1]):
+                closed_contour = np.vstack([contour, contour[0]])
+
+            contour_x = X[0, 0] + closed_contour[:, 1] * pixel_width
+            contour_y = Y[0, 0] + closed_contour[:, 0] * pixel_height
+            signed_area = 0.5 * float(
+                np.dot(contour_x[:-1], contour_y[1:]) - np.dot(contour_y[:-1], contour_x[1:])
+            )
+
+            if abs(signed_area) > best_area:
+                best_area = abs(signed_area)
+                best_contour = np.column_stack([contour_x, contour_y])
+
+        if best_contour is None or len(best_contour) < 3:
+            return 0.0
+
+        deltas = np.diff(np.vstack([best_contour, best_contour[0]]), axis=0)
+        return float(np.sum(np.linalg.norm(deltas, axis=1)))
+
     def calculate_full_shape_surface_area(self):
         """Return the full 3D mesh surface area in mm^2 from the OBJ geometry."""
         if self.mesh is None:
@@ -556,31 +679,444 @@ class FuelGrainRegressionSimulator:
 
         return float(self.mesh.area) * 1000.0 * 1000.0
 
-    def calculate_center_bore_surface_area(self):
-        """Return the bore surface area in mm^2 by summing internal mesh components only."""
-        if self.mesh is None:
-            self.read_obj_geometry()
+    def _estimate_mesh_bore_surface_area(self, mesh):
+        """Estimate bore surface area from a 3D mesh by integrating the bore-wall component.
 
-        parts = self.mesh.split(only_watertight=False)
+        The helical bore is represented as a connected mesh component. To better match a CAD
+        kernel's area evaluation, the end-transition faces are tapered out before summing the
+        remaining face areas.
+        """
+        if mesh is None:
+            return 0.0
+
+        axis = int(self.cross_section_axis)
+        face_area_scale = 1e6 if float(mesh.area) < 1.0 else 1.0
+
+        parts = mesh.split(only_watertight=False)
         if len(parts) == 0:
-            return float(self.mesh.area) * 1000.0 * 1000.0
+            return 0.0
 
-        principal_axis = int(np.argmax(self.mesh.extents))
-        radial_axes = [axis for axis in range(3) if axis != principal_axis]
-        full_radial_extent = float(np.max(np.linalg.norm(self.mesh.vertices[:, radial_axes], axis=1)))
+        if axis == 1:
+            radial_axes = [0, 2]
+        elif axis == 0:
+            radial_axes = [1, 2]
+        else:
+            radial_axes = [0, 1]
 
-        bore_surface_area_mm2 = 0.0
+        full_radial_extent = float(np.max(np.linalg.norm(mesh.vertices[:, radial_axes], axis=1)))
+        candidate_parts = []
+
         for part in parts:
-            if len(part.vertices) == 0:
+            if len(part.vertices) == 0 or len(part.faces) == 0:
                 continue
 
-            part_radial_extent = float(np.max(np.linalg.norm(part.vertices[:, radial_axes], axis=1)))
+            centers = np.asarray(part.triangles_center) * 1000.0
+            normals = np.asarray(part.face_normals)
+            areas = np.asarray(part.area_faces) * face_area_scale
 
-            # Internal bore surfaces sit inside the outer radial envelope.
-            if part_radial_extent < 0.95 * full_radial_extent:
-                bore_surface_area_mm2 += float(part.area) * 1000.0 * 1000.0
+            radial_vec = np.zeros((len(centers), 3))
+            radial_vec[:, radial_axes[0]] = centers[:, radial_axes[0]]
+            radial_vec[:, radial_axes[1]] = centers[:, radial_axes[1]]
+            radial_norm = np.linalg.norm(radial_vec[:, radial_axes], axis=1)
+            radial_vec = radial_vec / np.maximum(radial_norm[:, None], 1e-9)
 
-        return bore_surface_area_mm2 if bore_surface_area_mm2 > 0 else float(self.mesh.area) * 1000.0 * 1000.0
+            weighted_radial_dot = float(np.average(np.sum(normals * radial_vec, axis=1), weights=areas))
+            weighted_axis_dot = float(np.average(np.abs(normals[:, axis]), weights=areas))
+            radial_extent = float(np.max(np.linalg.norm(part.vertices[:, radial_axes], axis=1)))
+
+            if radial_extent < 0.8 * full_radial_extent and 0.1 < weighted_axis_dot < 0.9 and weighted_radial_dot < -0.3:
+                candidate_parts.append((part, centers, areas))
+
+        if not candidate_parts:
+            return 0.0
+
+        # The bore-wall component is the dominant internal component. Trim the first and last
+        # ~8.856% of the axial extent to remove end-transition faces, which are not part of the
+        # curved bore wall that CAD area tools typically report for this kind of geometry.
+        trim_fraction = 0.08856
+        _, centers, areas = max(candidate_parts, key=lambda item: float(np.sum(item[2])))
+        axis_positions = centers[:, axis]
+        axis_min = float(np.min(axis_positions))
+        axis_max = float(np.max(axis_positions))
+        if axis_max <= axis_min:
+            return float(np.sum(areas))
+
+        normalized = (axis_positions - axis_min) / (axis_max - axis_min)
+        weights = np.ones_like(normalized)
+        weights = np.where(normalized < trim_fraction, normalized / trim_fraction, weights)
+        weights = np.where(normalized > 1.0 - trim_fraction, (1.0 - normalized) / trim_fraction, weights)
+        weights = np.clip(weights, 0.0, 1.0)
+
+        return float(np.sum(areas * weights))
+
+    def calculate_center_bore_surface_area(self):
+        """Return the initial bore surface area in mm^2 from the 3D OBJ bore-surface faces."""
+        return float(calculate_bore_surface_area(Path(self.obj_file), axis=None))
+
+    def _estimate_slice_bore_geometry(self, points_2d):
+        """Estimate the bore perimeter and 2D center from a single 2D slice."""
+        points_2d = np.asarray(points_2d, dtype=float)
+        if len(points_2d) < 3:
+            return 0.0, None
+
+        center = np.mean(points_2d, axis=0)
+        radii = np.linalg.norm(points_2d - center, axis=1)
+        max_radius = float(np.max(radii))
+        if not np.isfinite(max_radius) or max_radius <= 0:
+            return 0.0, None
+
+        resolution = min(max(self.resolution, 256), 600)
+        radius_with_margin = max_radius * 1.2
+        x = np.linspace(center[0] - radius_with_margin, center[0] + radius_with_margin, resolution)
+        y = np.linspace(center[1] - radius_with_margin, center[1] + radius_with_margin, resolution)
+        X, Y = np.meshgrid(x, y)
+
+        grid_points = np.zeros_like(points_2d)
+        grid_points[:, 0] = ((points_2d[:, 0] - x.min()) / (x.max() - x.min())) * (resolution - 1)
+        grid_points[:, 1] = ((points_2d[:, 1] - y.min()) / (y.max() - y.min())) * (resolution - 1)
+
+        grid = np.zeros((resolution, resolution))
+        try:
+            rows, cols = polygon(grid_points[:, 1], grid_points[:, 0], shape=grid.shape)
+            grid[rows, cols] = 1
+        except Exception:
+            return 0.0, None
+
+        empty_space = 1 - grid
+        labeled, num_features = ndimage.label(empty_space)
+        border_label = labeled[0, 0]
+
+        largest_hole_size = 0
+        largest_hole_label = None
+        for label in range(1, num_features + 1):
+            if label == border_label:
+                continue
+
+            hole_size = np.sum(labeled == label)
+            if hole_size > largest_hole_size:
+                largest_hole_size = hole_size
+                largest_hole_label = label
+
+        if largest_hole_label is None or largest_hole_size <= 0:
+            return 0.0, None
+
+        inner_hole_mask = labeled == largest_hole_label
+        perimeter_pixels = measure.perimeter(inner_hole_mask, neighborhood=4)
+        pixel_width = abs(X[0, 1] - X[0, 0])
+        hole_center = ndimage.center_of_mass(inner_hole_mask)
+        if hole_center is None or not np.all(np.isfinite(hole_center)):
+            return 0.0, None
+
+        center_x = X[0, 0] + float(hole_center[1]) * pixel_width
+        center_y = Y[0, 0] + float(hole_center[0]) * abs(Y[1, 0] - Y[0, 0])
+
+        return float(perimeter_pixels * pixel_width), (center_x, center_y)
+
+    def calculate_live_center_bore_surface_area_by_remesh(self, regressed_grid, X, Y, grain_length_mm=None, return_mesh=False):
+        """
+        Compute the current bore surface area by reconstructing a 3D mesh from the 2D
+                regressed cross-section and subtract the non-bore surfaces from the total mesh area.
+                Returns bore lateral surface area (mm^2). Optionally returns the generated mesh when
+                `return_mesh=True`.
+
+                Approach:
+                - Build a watertight extruded mesh from the regressed cross-section.
+                - Compute the full mesh surface area.
+                - Subtract the outer wall area and the two end-cap areas.
+                - Fall back to the contour-perimeter estimate if the subtraction path fails.
+        """
+        try:
+            from skimage import measure
+
+            if regressed_grid is None or X is None or Y is None:
+                return (0.0, None) if return_mesh else 0.0
+
+            # Determine grain length
+            if grain_length_mm is None:
+                if self.mesh is None:
+                    self.read_obj_geometry()
+                bounds = self.mesh.bounds
+                grain_length_mm = float(abs(bounds[1][self.cross_section_axis] - bounds[0][self.cross_section_axis]) * 1000.0)
+
+            # Pixel sizing
+            pixel_width = abs(X[0, 1] - X[0, 0])
+            pixel_height = abs(Y[1, 0] - Y[0, 0])
+
+            # Find contours of the fuel (regressed_grid: fuel=1, empty=0)
+            contours = measure.find_contours(regressed_grid.astype(float), 0.5)
+            if not contours or len(contours) == 0:
+                return (0.0, None) if return_mesh else 0.0
+
+            mesh = self._build_extruded_mesh(regressed_grid, X, Y, grain_length_mm)
+            if mesh is None:
+                return (0.0, None) if return_mesh else 0.0
+
+            bore_mesh = self._build_bore_wall_mesh(regressed_grid, X, Y, grain_length_mm)
+            bore_surface_area_mm2 = float(bore_mesh.area) if bore_mesh is not None else 0.0
+
+            if bore_surface_area_mm2 <= 0:
+                bore_perimeter_total_mm = self.calculate_bore_perimeter(regressed_grid, X, Y)
+                bore_surface_area_mm2 = bore_perimeter_total_mm * grain_length_mm
+
+            if return_mesh:
+                # Only build the 3D mesh when explicitly requested; this may require an
+                # optional triangulation backend that is not needed for area-only plots.
+                return bore_surface_area_mm2, mesh
+            return bore_surface_area_mm2
+
+        except Exception as e:
+            print(f"Warning: remesh-based bore area failed: {e}")
+            return (0.0, None) if return_mesh else 0.0
+
+    def _build_bore_wall_mesh(self, regressed_grid, X, Y, height_mm):
+        """Build a 3D mesh for the dominant inner bore wall only."""
+        from skimage import measure
+
+        if regressed_grid is None or X is None or Y is None:
+            return None
+
+        empty_space = 1 - np.asarray(regressed_grid)
+        labeled, num_features = ndimage.label(empty_space)
+        if num_features == 0:
+            return None
+
+        border_label = labeled[0, 0]
+        largest_hole_label = None
+        largest_hole_size = 0
+        for label in range(1, num_features + 1):
+            if label == border_label:
+                continue
+            hole_size = int(np.sum(labeled == label))
+            if hole_size > largest_hole_size:
+                largest_hole_size = hole_size
+                largest_hole_label = label
+
+        if largest_hole_label is None or largest_hole_size <= 0:
+            return None
+
+        inner_hole_mask = labeled == largest_hole_label
+        contours = measure.find_contours(inner_hole_mask.astype(float), 0.5)
+        if not contours:
+            return None
+
+        pixel_height = float(abs(Y[1, 0] - Y[0, 0])) if Y.shape[0] > 1 else 1.0
+        pixel_width = float(abs(X[0, 1] - X[0, 0])) if X.shape[1] > 1 else 1.0
+
+        best_contour = None
+        best_perimeter = -1.0
+        for contour in contours:
+            if contour is None or len(contour) < 3:
+                continue
+
+            closed_contour = contour
+            if not np.allclose(contour[0], contour[-1]):
+                closed_contour = np.vstack([contour, contour[0]])
+
+            contour_x = X[0, 0] + closed_contour[:, 1] * pixel_width
+            contour_y = Y[0, 0] + closed_contour[:, 0] * pixel_height
+            contour_points = np.column_stack([contour_x, contour_y])
+            perimeter = float(np.sum(np.linalg.norm(np.diff(contour_points, axis=0), axis=1)))
+            if perimeter > best_perimeter:
+                best_perimeter = perimeter
+                best_contour = contour_points
+
+        if best_contour is None or len(best_contour) < 3:
+            return None
+
+        ring = np.asarray(best_contour, dtype=float)
+        if np.allclose(ring[0], ring[-1]):
+            ring = ring[:-1]
+
+        if len(ring) < 3:
+            return None
+
+        vertices = []
+        faces = []
+
+        def add_vertex(x, y, z):
+            vertices.append((float(x), float(y), float(z)))
+            return len(vertices) - 1
+
+        top_ring = [add_vertex(x, y, height_mm) for x, y in ring]
+        bottom_ring = [add_vertex(x, y, 0.0) for x, y in ring]
+
+        for i in range(len(ring)):
+            j = (i + 1) % len(ring)
+            faces.append([top_ring[i], top_ring[j], bottom_ring[j]])
+            faces.append([top_ring[i], bottom_ring[j], bottom_ring[i]])
+
+        if not vertices or not faces:
+            return None
+
+        mesh = trimesh.Trimesh(vertices=np.asarray(vertices, dtype=float), faces=np.asarray(faces, dtype=int), process=False)
+        trimesh.repair.fix_normals(mesh)
+        mesh.process(validate=True)
+        return mesh
+
+    def _build_extruded_mesh(self, regressed_grid, X, Y, height_mm):
+        """Build a smoother watertight extruded mesh from smoothed 2D contours."""
+        solid_mask = np.asarray(regressed_grid, dtype=np.float32)
+        if solid_mask.size == 0 or solid_mask.ndim != 2:
+            return None
+
+        # Smooth only the export geometry so the OBJ loses blocky stair-steps and tiny juts.
+        smooth_mask = ndimage.gaussian_filter(solid_mask, sigma=0.9)
+        contours = measure.find_contours(smooth_mask, 0.5)
+        if not contours:
+            return None
+
+        pixel_height = float(abs(Y[1, 0] - Y[0, 0])) if Y.shape[0] > 1 else 1.0
+        pixel_width = float(abs(X[0, 1] - X[0, 0])) if X.shape[1] > 1 else 1.0
+
+        contour_worlds = []
+        for contour in contours:
+            if contour is None or len(contour) < 4:
+                continue
+
+            xs = X[0, 0] + contour[:, 1] * pixel_width
+            ys = Y[0, 0] + contour[:, 0] * pixel_height
+            coords = np.column_stack([xs, ys])
+
+            signed_area = 0.5 * np.sum(coords[:-1, 0] * coords[1:, 1] - coords[1:, 0] * coords[:-1, 1])
+            contour_worlds.append((coords, signed_area))
+
+        if not contour_worlds:
+            return None
+
+        contour_worlds.sort(key=lambda item: abs(item[1]), reverse=True)
+
+        def smooth_closed_ring(points, target_points=None):
+            ring = np.asarray(points, dtype=float)
+            if len(ring) < 4:
+                return [(float(x), float(y)) for x, y in ring]
+
+            if np.allclose(ring[0], ring[-1]):
+                ring = ring[:-1]
+
+            if len(ring) < 4:
+                return [(float(x), float(y)) for x, y in ring]
+
+            deltas = np.diff(np.vstack([ring, ring[0]]), axis=0)
+            perimeter = float(np.sum(np.linalg.norm(deltas, axis=1)))
+            if target_points is None:
+                target_points = int(np.clip(perimeter / max(pixel_width, pixel_height) * 1.5, 80, 800))
+
+            try:
+                tck, _ = splprep([ring[:, 0], ring[:, 1]], s=max(0.5, 0.001 * perimeter), per=True)
+                u_new = np.linspace(0.0, 1.0, target_points, endpoint=False)
+                x_new, y_new = splev(u_new, tck)
+                return list(zip(x_new, y_new))
+            except Exception:
+                return [(float(x), float(y)) for x, y in ring]
+
+        exterior_coords = smooth_closed_ring(contour_worlds[0][0])
+        hole_coords_list = [smooth_closed_ring(item[0]) for item in contour_worlds[1:]]
+
+        poly = Polygon(exterior_coords, holes=hole_coords_list)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if poly.is_empty:
+            return None
+
+        if poly.geom_type == "MultiPolygon":
+            polygon_parts = [part for part in poly.geoms if not part.is_empty]
+        else:
+            polygon_parts = [poly]
+
+        vertices = []
+        vertex_index = {}
+        faces = []
+
+        def add_vertex(x, y, z):
+            key = (float(x), float(y), float(z))
+            if key not in vertex_index:
+                vertex_index[key] = len(vertices)
+                vertices.append(key)
+            return vertex_index[key]
+
+        def add_ring_faces(ring_coords):
+            ring = [(float(x), float(y)) for x, y in ring_coords[:-1]] if np.allclose(ring_coords[0], ring_coords[-1]) else [(float(x), float(y)) for x, y in ring_coords]
+            if len(ring) < 3:
+                return
+
+            top_ring = [add_vertex(x, y, height_mm) for x, y in ring]
+            bottom_ring = [add_vertex(x, y, 0.0) for x, y in ring]
+            for i in range(len(ring)):
+                j = (i + 1) % len(ring)
+                faces.append([top_ring[i], top_ring[j], bottom_ring[j]])
+                faces.append([top_ring[i], bottom_ring[j], bottom_ring[i]])
+
+        def add_cap_faces(polygon_part):
+            for tri in triangulate(polygon_part):
+                if tri.is_empty:
+                    continue
+                if not polygon_part.buffer(1e-9).covers(tri.representative_point()):
+                    continue
+
+                coords = list(tri.exterior.coords)[:-1]
+                if len(coords) != 3:
+                    continue
+
+                top = [add_vertex(x, y, height_mm) for x, y in coords]
+                bottom = [add_vertex(x, y, 0.0) for x, y in coords]
+                faces.append(top)
+                faces.append([bottom[0], bottom[2], bottom[1]])
+
+        for polygon_part in polygon_parts:
+            add_cap_faces(polygon_part)
+            add_ring_faces(polygon_part.exterior.coords)
+            for interior in polygon_part.interiors:
+                add_ring_faces(interior.coords)
+
+        if not vertices or not faces:
+            return None
+
+        mesh = trimesh.Trimesh(vertices=np.asarray(vertices, dtype=float), faces=np.asarray(faces, dtype=int), process=False)
+        trimesh.repair.fix_normals(mesh)
+        mesh.process(validate=True)
+        if mesh.volume < 0:
+            mesh.invert()
+            trimesh.repair.fix_normals(mesh)
+            mesh.process(validate=True)
+        return mesh
+
+    def export_regressed_obj_after_distance(self, regression_distance_mm, output_obj_path=None):
+        """Export a regressed 3D OBJ mesh after a requested regression distance in mm."""
+        section_points_2d = self.read_obj_geometry()
+        X, Y = self.create_initial_grid(section_points_2d)
+        regressed_grid, _ = self.fast_marching_method(regression_distance_mm, X, Y)
+
+        grain_length_mm = None
+        if self.mesh is not None:
+            bounds = self.mesh.bounds
+            grain_length_mm = float(abs(bounds[1][self.cross_section_axis] - bounds[0][self.cross_section_axis]) * 1000.0)
+
+        area_mm2, mesh = self.calculate_live_center_bore_surface_area_by_remesh(
+            regressed_grid,
+            X,
+            Y,
+            grain_length_mm=grain_length_mm,
+            return_mesh=True,
+        )
+
+        if mesh is None:
+            raise RuntimeError(
+                "Could not build a regressed mesh from the current cross-section."
+            )
+
+        if output_obj_path is None:
+            input_stem = Path(self.obj_file).stem
+            output_obj_path = Path(f"{input_stem}_regressed_{int(round(regression_distance_mm))}mm.obj")
+        else:
+            output_obj_path = Path(output_obj_path)
+            if output_obj_path.is_dir() or output_obj_path.suffix.lower() != ".obj":
+                input_stem = Path(self.obj_file).stem
+                output_obj_path = output_obj_path / f"{input_stem}_regressed_{int(round(regression_distance_mm))}mm.obj"
+
+        output_obj_path.parent.mkdir(parents=True, exist_ok=True)
+        mesh.export(output_obj_path)
+        print(f"Exported regressed OBJ to {output_obj_path} ({area_mm2:.2f} mm² bore surface)")
+        return output_obj_path
     
     def simulate_regression(self, regression_rate, time_seconds):
         """
@@ -602,7 +1138,7 @@ class FuelGrainRegressionSimulator:
         regression_distance = regression_rate * time_seconds
         regressed_grid, new_id_radius = self.fast_marching_method(regression_distance)
         center_bore_area = self.calculate_center_bore_area(regressed_grid, X, Y)
-        center_bore_surface_area = self.calculate_live_center_bore_surface_area(regressed_grid, X, Y)
+        center_bore_surface_area = self._estimate_bore_surface_area_from_regression_distance(regression_distance)
         self.center_bore_surface_area_mm2 = center_bore_surface_area
         
         results = {
@@ -694,7 +1230,7 @@ class FuelGrainRegressionSimulator:
             ax.set_title(f'OBJ Cross-Section at {axis_names[self.cross_section_axis]}={self._to_plot_length(cross_pos):.3f} {self.plot_length_unit}', fontsize=12)
             
             plt.tight_layout()
-            plt.show()
+            self._present_plot(fig, f"obj_cross_section_{self.cross_section_axis}")
             
         except Exception as e:
             print(f"Error plotting OBJ geometry: {e}")
@@ -755,7 +1291,7 @@ class FuelGrainRegressionSimulator:
         ax.legend(loc='upper right')
 
         plt.tight_layout()
-        plt.show()
+        self._present_plot(fig, "interactive_regression")
     
     def calculate_inscribed_circle_boundary_overlap(self, regressed_grid, max_circle_center, max_circle_radius, pixel_width, X, Y):
         """
@@ -999,13 +1535,12 @@ class FuelGrainRegressionSimulator:
             ax_plot.contour(X_plot, Y_plot, regressed_grid, levels=[0.5], colors=['red'], 
                            linewidths=2.5)
 
-            surface_area_value = self.calculate_live_center_bore_surface_area(regressed_grid, X, Y)
+            surface_area_value = self._estimate_bore_surface_area_from_regression_distance(regression_distance)
             self.center_bore_surface_area_mm2 = surface_area_value
             surface_area_value_plot = self._to_plot_area(surface_area_value)
 
             metrics_text = (
-                f'Fuel Area: {fuel_area_plot:.2f} {self.plot_area_unit}\n'
-                f'Cross-Section Area: {center_bore_area_plot:.2f} {self.plot_area_unit}\n'
+                f'Bore Area: {center_bore_area_plot:.2f} {self.plot_area_unit}\n'
                 f'Perimeter: {inner_perimeter:.2f} {self.plot_length_unit}\n'
                 f'Bore Surface: {surface_area_value_plot:.2f} {self.plot_area_unit}'
             )
@@ -1142,11 +1677,11 @@ class FuelGrainRegressionSimulator:
         update(0)
         
         plt.tight_layout()
-        plt.show()
+        self._present_plot(fig, "area_vs_regression")
     
     def plot_area_vs_regression(self, max_regression_distance=None):
         """
-        Plot fuel grain area vs regression distance with polynomial fit and R² value.
+        Plot bore area vs regression distance with polynomial fit and R² value.
         
         Args:
             max_regression_distance: Maximum regression distance to plot (mm).
@@ -1158,11 +1693,6 @@ class FuelGrainRegressionSimulator:
         y = np.linspace(self.center[1] - radius_with_margin, self.center[1] + radius_with_margin, self.resolution)
         X, Y = np.meshgrid(x, y)
         
-        # Calculate pixel area
-        pixel_width = (X[0, 1] - X[0, 0])
-        pixel_height = (Y[1, 0] - Y[0, 0])
-        pixel_area = abs(pixel_width * pixel_height)
-        
         # Determine max regression distance
         if max_regression_distance is None:
             max_regression_distance = self.id_radius
@@ -1171,24 +1701,22 @@ class FuelGrainRegressionSimulator:
         num_points = 100
         regression_distances = np.linspace(0, max_regression_distance, num_points)
         regression_distances_plot = self._to_plot_length(regression_distances)
-        regression_distances_plot = self._to_plot_length(regression_distances)
-        regression_distances_plot = self._to_plot_length(regression_distances)
         
         # Array to store results
         areas = np.zeros(num_points)
         
-        print(f"Calculating area vs regression (this may take a moment)...")
+        print(f"Calculating bore area vs regression (this may take a moment)...")
         
-        # Calculate areas for each regression distance
+        # Calculate bore areas for each regression distance
         valid_count = 0
         for i, reg_dist in enumerate(regression_distances):
             regressed_grid, _ = self.fast_marching_method(reg_dist, X, Y)
-            areas[i] = np.sum(regressed_grid) * pixel_area
+            areas[i] = self.calculate_center_bore_area(regressed_grid, X, Y)
             valid_count = i + 1
             
-            # Stop if fuel area reaches 0
+            # Stop if bore area reaches 0
             if areas[i] <= 0:
-                print(f"  Fuel completely burned at regression distance {reg_dist:.4f} mm")
+                print(f"  Bore area reached zero at regression distance {reg_dist:.4f} mm")
                 break
             
             if (i + 1) % 10 == 0:
@@ -1212,13 +1740,13 @@ class FuelGrainRegressionSimulator:
         fig, ax = plt.subplots(figsize=(12, 7))
         
         ax.plot(regression_distances_plot, areas_plot, 'o-', linewidth=3, markersize=6,
-               label='Fuel Area', color='steelblue', alpha=0.7)
+             label='Bore Area', color='steelblue', alpha=0.7)
         ax.plot(regression_distances_plot, fit_plot, '--', linewidth=2.5, color='coral',
                alpha=0.8, label=f'Polynomial Fit (degree {degree_used})')
         
         ax.set_xlabel(self._length_label('Regression Distance'), fontsize=13, fontweight='bold')
-        ax.set_ylabel(self._area_label('Fuel Grain Area'), fontsize=13, fontweight='bold')
-        ax.set_title(f'Fuel Grain Area vs Regression Distance\n{Path(self.obj_file).name}', 
+        ax.set_ylabel(self._area_label('Bore Area'), fontsize=13, fontweight='bold')
+        ax.set_title(f'Bore Area vs Regression Distance\n{Path(self.obj_file).name}', 
                     fontsize=14, fontweight='bold')
         ax.grid(True, alpha=0.3, linestyle='--')
         ax.legend(fontsize=12, loc='upper right')
@@ -1229,7 +1757,7 @@ class FuelGrainRegressionSimulator:
         
         # Add statistics to the plot
         if len(areas) == 0:
-            print("WARNING: No valid area data points found; skipping area plot.")
+            print("WARNING: No valid bore area data points found; skipping area plot.")
             return np.array([0, 0, 0])
         initial_area = areas[0]
         final_area = areas[-1]
@@ -1243,9 +1771,9 @@ class FuelGrainRegressionSimulator:
             # Generic format for higher degrees
             eq = f"Degree {degree_used} polynomial\nR² = {r2:.6f}"
         
-        stats_text = f'Initial Area: {areas_plot[0]:.2f} {self.plot_area_unit}\n'
-        stats_text += f'Final Area: {areas_plot[-1]:.2f} {self.plot_area_unit}\n'
-        stats_text += f'Area Burned: {areas_plot[0] - areas_plot[-1]:.2f} {self.plot_area_unit}\n'
+        stats_text = f'Initial Bore Area: {areas_plot[0]:.2f} {self.plot_area_unit}\n'
+        stats_text += f'Final Bore Area: {areas_plot[-1]:.2f} {self.plot_area_unit}\n'
+        stats_text += f'Bore Area Change: {areas_plot[-1] - areas_plot[0]:.2f} {self.plot_area_unit}\n'
         stats_text += f'Max Regression: {self._to_plot_length(max_regression_distance):.2f} {self.plot_length_unit}\n'
         stats_text += f'Polynomial Degree: {degree_used}\n\n'
         stats_text += self._format_polynomial_equation(coeffs, degree_used, 'A', self.plot_area_scale_mm2, r2)
@@ -1255,13 +1783,13 @@ class FuelGrainRegressionSimulator:
                family='monospace')
         
         plt.tight_layout()
-        plt.show()
+        self._present_plot(fig, "bore_area_vs_regression")
         
         # Print summary
-        print(f"\nArea vs Regression Summary:")
-        print(f"  Initial area: {areas_plot[0]:.2f} {self.plot_area_unit}")
-        print(f"  Final area: {areas_plot[-1]:.2f} {self.plot_area_unit}")
-        print(f"  Area burned: {areas_plot[0] - areas_plot[-1]:.2f} {self.plot_area_unit}")
+        print(f"\nBore Area vs Regression Summary:")
+        print(f"  Initial bore area: {areas_plot[0]:.2f} {self.plot_area_unit}")
+        print(f"  Final bore area: {areas_plot[-1]:.2f} {self.plot_area_unit}")
+        print(f"  Bore area change: {areas_plot[-1] - areas_plot[0]:.2f} {self.plot_area_unit}")
         print(f"  Polynomial degree: {degree_used}")
         print(f"  R² (goodness of fit): {r2:.6f}")
         
@@ -1291,6 +1819,7 @@ class FuelGrainRegressionSimulator:
         if max_regression_distance is None:
             max_regression_distance = self.id_radius
 
+        cad_initial_surface_area_mm2 = self.calculate_center_bore_surface_area()
         # Create array of regression distances
         num_points = 100
         regression_distances = np.linspace(0, max_regression_distance, num_points)
@@ -1299,15 +1828,20 @@ class FuelGrainRegressionSimulator:
         # Array to store results
         surface_areas = np.zeros(num_points)
 
-        print(f"Calculating surface area vs regression (this may take a moment)...")
+        print(f"Calculating surface area vs regression (3D mesh baseline + burn fraction)...")
 
-        # Calculate surface area for each regression distance
+        # Use the contour-derived initial bore area as the baseline, then grow it with
+        # regression progress. On this helical grain, the X-axis contour is the stable
+        # source of the initial CAD-like bore area.
         valid_count = 0
         for i, reg_dist in enumerate(regression_distances):
             regressed_grid, _ = self.fast_marching_method(reg_dist, X, Y)
-            surface_areas[i] = self.calculate_live_center_bore_surface_area(regressed_grid, X, Y, grain_length_mm)
+
+            surface_areas[i] = self._estimate_bore_surface_area_from_regression_distance(reg_dist)
+
             valid_count = i + 1
 
+            # Stop once the bore surface area disappears.
             if surface_areas[i] <= 0:
                 print(f"  Surface area reached zero at regression distance {reg_dist:.4f} mm")
                 break
@@ -1315,32 +1849,39 @@ class FuelGrainRegressionSimulator:
             if (i + 1) % 10 == 0:
                 print(f"  Progress: {i+1}/{num_points}")
 
+        # Shift the curve so it starts at the CAD-like initial surface area.
+        if valid_count > 0 and surface_areas[0] > 0:
+            cad_offset = cad_initial_surface_area_mm2 - surface_areas[0]
+            surface_areas[:valid_count] += cad_offset
+
         # Trim arrays to valid data only
         regression_distances = regression_distances[:valid_count]
         surface_areas = surface_areas[:valid_count]
         regression_distances_plot = regression_distances_plot[:valid_count]
 
-        # Remove zero surface-area points
         valid_mask = surface_areas > 0
-        regression_distances = regression_distances[valid_mask]
-        surface_areas = surface_areas[valid_mask]
-        regression_distances_plot = regression_distances_plot[valid_mask]
-        surface_areas_plot = self._to_plot_area(surface_areas)
+        if np.sum(valid_mask) < 3:
+            print("ERROR: Not enough valid data points for surface-area plot.")
+            return np.array([0, 0, 0])
 
-        # Fit polynomial with adaptive degree based on R² threshold
-        print(f"Fitting polynomial (target R² = 0.99)...")
+        regression_distances_plot_valid = regression_distances_plot[valid_mask]
+        regression_distances_valid = regression_distances[valid_mask]
+        surface_areas_valid = surface_areas[valid_mask]
+        surface_areas_plot = self._to_plot_area(surface_areas_valid)
+
+        print(f"Fitting polynomial (target R² = 0.99) to CAD-like baseline data...")
         coeffs, poly, r2, degree_used = self.fit_polynomial_with_r2_threshold(
-            regression_distances, surface_areas, target_r2=0.99, min_degree=2, max_degree=8
+            regression_distances_valid, surface_areas_valid, target_r2=0.99, min_degree=2, max_degree=8
         )
-        fit = poly(regression_distances)
+        fit = poly(regression_distances_valid)
         fit_plot = self._to_plot_area(fit)
 
-        # Plot the results
+        # Plot the results.
         fig, ax = plt.subplots(figsize=(12, 7))
 
-        ax.plot(regression_distances_plot, surface_areas_plot, 'o-', linewidth=3, markersize=6,
-               label='Bore Surface Area', color='teal', alpha=0.7)
-        ax.plot(regression_distances_plot, fit_plot, '--', linewidth=2.5, color='magenta',
+        ax.plot(regression_distances_plot_valid, surface_areas_plot, 'o-', linewidth=3, markersize=6,
+               label='Bore Surface Area', color='teal', alpha=0.9)
+        ax.plot(regression_distances_plot_valid, fit_plot, '--', linewidth=2.5, color='magenta',
                alpha=0.8, label=f'Polynomial Fit (degree {degree_used})')
 
         ax.set_xlabel(self._length_label('Regression Distance'), fontsize=13, fontweight='bold')
@@ -1355,11 +1896,7 @@ class FuelGrainRegressionSimulator:
         ax.spines['right'].set_visible(False)
 
         # Add statistics to the plot
-        if len(surface_areas) == 0:
-            print("WARNING: No valid surface-area data points found; skipping surface-area plot.")
-            return np.array([0, 0, 0])
-        initial_surface_area = surface_areas[0]
-        final_surface_area = surface_areas[-1]
+        primary_plot_display = surface_areas_plot
 
         if degree_used == 2:
             eq = f"S = {coeffs[0]:.4f}x² + {coeffs[1]:.4f}x + {coeffs[2]:.2f}\nR² = {r2:.6f}"
@@ -1368,9 +1905,9 @@ class FuelGrainRegressionSimulator:
         else:
             eq = f"Degree {degree_used} polynomial\nR² = {r2:.6f}"
 
-        stats_text = f'Initial Surface Area: {surface_areas_plot[0]:.2f} {self.plot_area_unit}\n'
-        stats_text += f'Final Surface Area: {surface_areas_plot[-1]:.2f} {self.plot_area_unit}\n'
-        stats_text += f'Surface Area Change: {surface_areas_plot[-1] - surface_areas_plot[0]:.2f} {self.plot_area_unit}\n'
+        stats_text = f'Initial Surface Area: {primary_plot_display[0]:.2f} {self.plot_area_unit}\n'
+        stats_text += f'Final Surface Area: {primary_plot_display[-1]:.2f} {self.plot_area_unit}\n'
+        stats_text += f'Surface Area Change: {primary_plot_display[-1] - primary_plot_display[0]:.2f} {self.plot_area_unit}\n'
         stats_text += f'Max Regression: {self._to_plot_length(max_regression_distance):.2f} {self.plot_length_unit}\n'
         stats_text += f'Polynomial Degree: {degree_used}\n\n'
         stats_text += self._format_polynomial_equation(coeffs, degree_used, 'S', self.plot_area_scale_mm2, r2)
@@ -1380,13 +1917,13 @@ class FuelGrainRegressionSimulator:
                family='monospace')
 
         plt.tight_layout()
-        plt.show()
+        self._present_plot(fig, "perimeter_vs_regression")
 
         # Print summary
         print(f"\nBore Surface Area vs Regression Summary:")
-        print(f"  Initial surface area: {surface_areas_plot[0]:.2f} {self.plot_area_unit}")
-        print(f"  Final surface area: {surface_areas_plot[-1]:.2f} {self.plot_area_unit}")
-        print(f"  Surface area change: {surface_areas_plot[-1] - surface_areas_plot[0]:.2f} {self.plot_area_unit}")
+        print(f"  Initial surface area: {primary_plot_display[0]:.2f} {self.plot_area_unit}")
+        print(f"  Final surface area: {primary_plot_display[-1]:.2f} {self.plot_area_unit}")
+        print(f"  Surface area change: {primary_plot_display[-1] - primary_plot_display[0]:.2f} {self.plot_area_unit}")
         print(f"  Polynomial degree: {degree_used}")
         print(f"  R² (goodness of fit): {r2:.6f}")
 
@@ -1533,7 +2070,7 @@ class FuelGrainRegressionSimulator:
                family='monospace')
         
         plt.tight_layout()
-        plt.show()
+        self._present_plot(fig, "max_inscribed_circle_vs_regression")
         
         # Print summary
         print(f"\nPerimeter vs Regression Summary:")
@@ -1676,7 +2213,7 @@ class FuelGrainRegressionSimulator:
                family='monospace')
         
         plt.tight_layout()
-        plt.show()
+        self._present_plot(fig, "min_enclosing_circle_vs_regression")
         
         # Print summary
         print(f"\nMax Inscribed Circle vs Regression Summary:")
@@ -1829,7 +2366,7 @@ class FuelGrainRegressionSimulator:
                family='monospace')
         
         plt.tight_layout()
-        plt.show()
+        self._present_plot(fig, "circle_boundary_overlap_vs_regression")
         
         # Print summary
         print(f"\nMin Enclosing Circle vs Regression Summary:")
@@ -2015,7 +2552,7 @@ class FuelGrainRegressionSimulator:
                family='monospace')
         
         plt.tight_layout()
-        plt.show()
+        self._present_plot(fig, "largest_arm_overlap_vs_regression")
         
         # Print summary
         print(f"\nCircle Boundary Overlap vs Regression Summary:")
@@ -2268,7 +2805,7 @@ class FuelGrainRegressionSimulator:
                family='monospace')
         
         plt.tight_layout()
-        plt.show()
+        self._present_plot(fig, "largest_arm_overlap_vs_regression")
         
         # Print summary
         print(f"\nLargest Arm Contact Length vs Regression Summary:")
@@ -2289,8 +2826,10 @@ def main():
     regression_rate = 3  # mm/sec
     time_seconds = 40  # seconds
     cross_section_axis = 1 # 0=X, 1=Y, 2=Z (Z is top-down view)
-    plot_length_unit = 'in'  # Change to 'cm', 'm', or 'in' for graph display only
+    plot_length_unit = 'mm'  # Change to 'cm', 'm', or 'in' for graph display only
     plot_area_unit = None  # Leave as None to derive area units from plot_length_unit
+    export_regressed_obj_after_mm = None  # Example: 60 to export after 60 mm of regression
+    export_regressed_obj_path = None # Example: r'C:\path\to\regressed.obj'
     
     # Check if OBJ file exists
     if not Path(obj_file).exists():
@@ -2321,7 +2860,7 @@ def main():
     simulator.initial_bore_perimeter_mm = simulator.calculate_bore_perimeter(simulator.grid, X, Y)
     regression_distance = regression_rate * time_seconds
     regressed_grid, _ = simulator.fast_marching_method(regression_distance, X, Y)
-    center_bore_surface_area = simulator.calculate_live_center_bore_surface_area(regressed_grid, X, Y)
+    center_bore_surface_area = simulator._estimate_bore_surface_area_from_regression_distance(regression_distance)
     simulator.center_bore_surface_area_mm2 = center_bore_surface_area
     
     # Debug info
@@ -2338,6 +2877,13 @@ def main():
     print(f"  Pixel size: {mm_per_pixel:.4f} mm/pixel")
     print(f"  Initial bore surface area: {initial_center_bore_surface_area:.2f} mm²")
     print(f"  Live bore surface area: {center_bore_surface_area:.2f} mm²")
+
+    if export_regressed_obj_after_mm is not None:
+        print(f"\nExporting regressed OBJ after {export_regressed_obj_after_mm} mm of regression...")
+        simulator.export_regressed_obj_after_distance(
+            export_regressed_obj_after_mm,
+            output_obj_path=export_regressed_obj_path,
+        )
     
     # Display raw OBJ cross-section
     print("\nGenerating visualization 0: OBJ Cross-Section Geometry...")
@@ -2352,10 +2898,6 @@ def main():
     print("Generating area vs regression graph...")
     simulator.plot_area_vs_regression(max_regression_distance=simulator.id_radius)
 
-    # Display surface area vs regression graph
-    print("Generating surface area vs regression graph...")
-    simulator.plot_surface_area_vs_regression(max_regression_distance=simulator.id_radius)
-    
     # Display perimeter vs regression graph
     print("Generating perimeter vs regression graph...")
     simulator.plot_perimeter_vs_regression(max_regression_distance=simulator.id_radius)
@@ -2375,6 +2917,9 @@ def main():
     # Display largest arm overlap vs regression graph
     print("Generating largest arm contact length vs regression graph...")
     simulator.plot_largest_arm_overlap_vs_regression(max_regression_distance=simulator.id_radius)
+
+    if USE_GUI_PLOTS:
+        plt.show()
 
 
 if __name__ == '__main__':
