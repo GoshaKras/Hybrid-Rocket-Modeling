@@ -602,6 +602,65 @@ class FuelGrainRegressionSimulator:
 
         return total_inner_perimeter_mm
 
+    def find_burnthrough_regression_distance(
+        self,
+        X,
+        Y,
+        max_regression_distance=None,
+        samples=240,
+        perimeter_threshold_mm=1e-3,
+        refine_iterations=12,
+    ):
+        """Return the regression distance (mm) where burn-through first occurs.
+
+        Burn-through is detected when the inner bore perimeter collapses to ~0,
+        meaning the bore has connected to the outer free space in this 2D slice.
+        """
+        if X is None or Y is None or self.grid is None:
+            return None
+
+        if max_regression_distance is None:
+            max_regression_distance = self.id_radius
+
+        max_regression_distance = float(max(0.0, max_regression_distance))
+        if max_regression_distance <= 0.0:
+            return None
+
+        regressed_grid_0, _ = self.fast_marching_method(0.0, X, Y)
+        initial_perimeter = float(self.calculate_bore_perimeter(regressed_grid_0, X, Y))
+        if initial_perimeter <= perimeter_threshold_mm:
+            return 0.0
+
+        sample_count = int(max(20, samples))
+        distances = np.linspace(0.0, max_regression_distance, sample_count)
+
+        prev_distance = float(distances[0])
+        prev_perimeter = initial_perimeter
+
+        for distance in distances[1:]:
+            regressed_grid, _ = self.fast_marching_method(float(distance), X, Y)
+            perimeter = float(self.calculate_bore_perimeter(regressed_grid, X, Y))
+
+            if perimeter <= perimeter_threshold_mm:
+                low = prev_distance
+                high = float(distance)
+
+                for _ in range(int(max(0, refine_iterations))):
+                    mid = 0.5 * (low + high)
+                    regressed_mid, _ = self.fast_marching_method(mid, X, Y)
+                    mid_perimeter = float(self.calculate_bore_perimeter(regressed_mid, X, Y))
+                    if mid_perimeter <= perimeter_threshold_mm:
+                        high = mid
+                    else:
+                        low = mid
+
+                return float(high)
+
+            prev_distance = float(distance)
+            prev_perimeter = perimeter
+
+        return None
+
     def calculate_cross_section_solid_area(self, binary_grid, X, Y):
         """Return the filled cross-section area in mm^2 using the outer contour."""
         if binary_grid is None or X is None or Y is None:
@@ -1290,8 +1349,13 @@ class FuelGrainRegressionSimulator:
         ax.set_title(f'Fuel Grain After Regression\nID: {new_id_radius_plot:.2f} {self.plot_length_unit}, OD: {od_radius_plot:.2f} {self.plot_length_unit}')
         ax.legend(loc='upper right')
 
-        plt.tight_layout()
-        self._present_plot(fig, "interactive_regression")
+        # Do not call tight_layout with custom slider axes; it can shift/overlap controls.
+        if USE_GUI_PLOTS:
+            fig.canvas.draw_idle()
+            # Block here so the UI event loop stays responsive while using the slider.
+            plt.show(block=True)
+        else:
+            self._present_plot(fig, "interactive_regression")
     
     def calculate_inscribed_circle_boundary_overlap(self, regressed_grid, max_circle_center, max_circle_radius, pixel_width, X, Y):
         """
@@ -1354,30 +1418,19 @@ class FuelGrainRegressionSimulator:
             print(f"Warning: Could not calculate circle boundary overlap: {e}")
             return 0.0
     
-    def plot_cross_section_interactive(self, regression_rate, max_time):
+    def plot_cross_section_interactive(self, regression_rate, max_time, frame_count=100):
+        """Display cached regression playback with a responsive slider.
+
+        This precomputes the regression frames once, then the slider only swaps
+        between cached frames and metrics. That makes dragging smooth and avoids
+        expensive geometry work on every slider event.
         """
-        Display regression over time with an interactive slider
-        
-        Args:
-            regression_rate: Regression rate (mm/sec)
-            max_time: Maximum time to show (seconds)
-        """
-        # Check if grid is populated
         if self.grid is None or np.sum(self.grid) == 0:
             print("Error: Grid is empty! Cannot display regression.")
             return
-        
-        # Set up the figure
-        fig = plt.figure(figsize=(14, 10))
-        ax_plot = plt.axes([0.15, 0.25, 0.7, 0.65])
-        ax_slider = plt.axes([0.15, 0.1, 0.7, 0.03])
-        
-        # Add spacing for title
-        plt.subplots_adjust(top=0.92)
-        
-        # Create slider for time
-        slider = Slider(ax_slider, 'Time (sec)', 0, max_time, valinit=0, color='steelblue')
-        
+
+        frame_count = int(max(20, frame_count))
+
         # Create meshgrid once
         radius_with_margin = self.od_radius * 1.2
         x = np.linspace(self.center[0] - radius_with_margin, self.center[0] + radius_with_margin, self.resolution)
@@ -1385,166 +1438,66 @@ class FuelGrainRegressionSimulator:
         X, Y = np.meshgrid(x, y)
         X_plot = self._to_plot_length(X)
         Y_plot = self._to_plot_length(Y)
-        center_plot = self._to_plot_length(self.center)
 
         if getattr(self, "full_3d_surface_area_mm2", None) is None:
             self.full_3d_surface_area_mm2 = self.calculate_center_bore_surface_area()
-        if getattr(self, "initial_bore_perimeter_mm", None) is None:
-            self.initial_bore_perimeter_mm = self.calculate_bore_perimeter(self.grid, X, Y)
-        
-        def update(val):
-            """Update visualization"""
+
+        print(f"Precomputing {frame_count} slider frames...")
+        times = np.linspace(0.0, float(max_time), frame_count)
+        distances = regression_rate * times
+        cached_grids = []
+        cached_bore_areas = np.zeros(frame_count, dtype=float)
+        cached_bore_surfaces = np.zeros(frame_count, dtype=float)
+        cached_perimeters = np.zeros(frame_count, dtype=float)
+
+        for i, distance in enumerate(distances):
+            regressed_grid, _ = self.fast_marching_method(float(distance), X, Y)
+            cached_grids.append(regressed_grid)
+            cached_bore_areas[i] = self.calculate_center_bore_area(regressed_grid, X, Y)
+            cached_perimeters[i] = self.calculate_bore_perimeter(regressed_grid, X, Y)
+            cached_bore_surfaces[i] = self._estimate_bore_surface_area_from_regression_distance(float(distance))
+
+            if (i + 1) % max(1, frame_count // 5) == 0 or i == frame_count - 1:
+                print(f"  Cached {i+1}/{frame_count} frames")
+
+        fig = plt.figure(figsize=(14, 10))
+        ax_plot = plt.axes([0.15, 0.25, 0.7, 0.65])
+        ax_slider = plt.axes([0.15, 0.1, 0.7, 0.03])
+        plt.subplots_adjust(top=0.92)
+
+        slider = Slider(ax_slider, 'Time (sec)', 0.0, float(max_time), valinit=0.0, color='steelblue')
+
+        def draw_frame(frame_index):
             ax_plot.clear()
-            
-            time_val = slider.val
-            regression_distance = regression_rate * time_val
-            
-            # Get regressed grid
-            regressed_grid, new_id_radius = self.fast_marching_method(regression_distance, X, Y)
-            
-            # Calculate area and perimeter
-            pixel_width = (X[0, 1] - X[0, 0])
-            pixel_height = (Y[1, 0] - Y[0, 0])
-            pixel_area = abs(pixel_width * pixel_height)
-            
-            # Area of fuel grain (in mm²)
-            fuel_area = np.sum(regressed_grid) * pixel_area
-            center_bore_area = self.calculate_center_bore_area(regressed_grid, X, Y)
-            fuel_area_plot = self._to_plot_area(fuel_area)
-            center_bore_area_plot = self._to_plot_area(center_bore_area)
-            
-            # ID Perimeter - calculate actual boundary of the inner star-shaped hole
-            from skimage import measure
-            from scipy import ndimage
-            
-            # Find the inner hole boundary
-            empty_space = 1 - regressed_grid
-            labeled, num_features = ndimage.label(empty_space)
-            border_label = labeled[0, 0]
-            
-            # Find the largest inner hole (excluding the outer border)
-            inner_perimeter = 0
-            max_inscribed_diameter = 0
-            max_circle_center = None
-            max_circle_radius = 0
-            min_enclosing_diameter = 0
-            min_enclosing_center = None
-            min_enclosing_radius = 0
-            fuel_perimeter = 0
-            overlap_length_mm = 0
-            
-            largest_hole_size = 0
-            largest_hole_label = None
-            
-            for label in range(1, num_features + 1):
-                if label != border_label:
-                    hole_size = np.sum(labeled == label)
-                    if hole_size > largest_hole_size:
-                        largest_hole_size = hole_size
-                        largest_hole_label = label
-            
-            # Process only the largest hole
-            if largest_hole_label is not None:
-                inner_hole_mask = (labeled == largest_hole_label)
-                
-                if np.sum(inner_hole_mask) > 0:
-                    center_bore_area = np.sum(inner_hole_mask) * pixel_area
 
-                    # Calculate inner hole perimeter using neighborhood=4 with 0.95 correction
-                    perimeter_pixels = measure.perimeter(inner_hole_mask, neighborhood=4)
-                    inner_perimeter = perimeter_pixels * pixel_width * 0.95
-                    
-                    # Calculate fuel grain perimeter (outer boundary)
-                    # Use neighborhood=4 with 0.95 correction factor for 5% overestimation
-                    fuel_perimeter_pixels = measure.perimeter(regressed_grid, neighborhood=4)
-                    fuel_perimeter = fuel_perimeter_pixels * pixel_width * 0.95
-                    
-                    # Find the largest circle that fits inside the hole
-                    # Use distance transform - max value is the radius of largest inscribed circle
-                    distance_from_boundary = distance_transform_edt(inner_hole_mask)
-                    max_radius_pixels = np.max(distance_from_boundary)
-                    max_inscribed_diameter = 2 * max_radius_pixels * pixel_width
-                    max_circle_radius = max_radius_pixels * pixel_width
-                    max_circle_radius_plot = self._to_plot_length(max_circle_radius)
-                    max_inscribed_diameter_plot = self._to_plot_length(max_inscribed_diameter)
-                    
-                    print(f"Largest hole: perimeter={inner_perimeter:.2f} mm, inscribed_radius={max_circle_radius:.2f} mm")
-                    
-                    # Find center of largest inscribed circle (point with max distance)
-                    center_pixel = np.unravel_index(np.argmax(distance_from_boundary), distance_from_boundary.shape)
-                    # Convert pixel coordinates to world coordinates
-                    max_circle_center = (X[0, 0] + center_pixel[1] * pixel_width,
-                                        Y[0, 0] + center_pixel[0] * pixel_height)
-                    
-                    # Find the smallest circle that encompasses the entire hole boundary (minimum enclosing circle)
-                    contours = measure.find_contours(inner_hole_mask, 0.5)
-                    if contours and len(contours) > 0:
-                        boundary_pixels = contours[0]
-                        # Convert to world coordinates
-                        boundary_points = np.column_stack([
-                            X[0, 0] + boundary_pixels[:, 1] * pixel_width,
-                            Y[0, 0] + boundary_pixels[:, 0] * pixel_height
-                        ])
-                        
-                        # Find minimum enclosing circle using centroid + max distance
-                        min_enclosing_center = boundary_points.mean(axis=0)
-                        min_enclosing_radius = np.max(np.linalg.norm(boundary_points - min_enclosing_center, axis=1))
-                        min_enclosing_diameter = 2 * min_enclosing_radius
-                        min_enclosing_radius_plot = self._to_plot_length(min_enclosing_radius)
-                        min_enclosing_diameter_plot = self._to_plot_length(min_enclosing_diameter)
-                    else:
-                        # Fallback if no contours found
-                        min_enclosing_center = max_circle_center
-                        min_enclosing_radius = max_circle_radius
-                        min_enclosing_diameter = max_inscribed_diameter
-                        min_enclosing_radius_plot = max_circle_radius_plot
-                        min_enclosing_diameter_plot = max_inscribed_diameter_plot
-                    
-                    # Calculate circle boundary overlap (arc length where green circle touches red boundary)
-                    circle_overlap = self.calculate_inscribed_circle_boundary_overlap(
-                        regressed_grid, max_circle_center, max_circle_radius, pixel_width, X, Y
-                    )
-                    overlap_length_mm = circle_overlap
-                    overlap_length_plot = self._to_plot_length(overlap_length_mm)
-            else:
-                # No significant holes found - set defaults
-                inner_perimeter = 0
-                max_inscribed_diameter = 0
-                max_circle_center = None
-                max_circle_radius = 0
-                min_enclosing_diameter = 0
-                min_enclosing_center = None
-                min_enclosing_radius = 0
-                fuel_perimeter = 0
-                overlap_length_mm = 0
-                overlap_length_plot = 0
-            
-            # Plot initial shape - filled
-            ax_plot.imshow(self.grid, extent=[X_plot.min(), X_plot.max(), Y_plot.min(), Y_plot.max()], 
-                          origin='lower', cmap='Blues', alpha=0.4)
-            
-            # Plot initial shape - contour
-            ax_plot.contour(X_plot, Y_plot, self.grid, levels=[0.5], colors=['blue'], 
-                           linewidths=2.5, linestyles='--')
-            
-            # Plot regressed shape - filled
-            ax_plot.imshow(regressed_grid, extent=[X_plot.min(), X_plot.max(), Y_plot.min(), Y_plot.max()], 
-                          origin='lower', cmap='Reds', alpha=0.4)
-            
-            # Plot regressed shape - contour
-            ax_plot.contour(X_plot, Y_plot, regressed_grid, levels=[0.5], colors=['red'], 
-                           linewidths=2.5)
+            regressed_grid = cached_grids[frame_index]
+            bore_area_plot = self._to_plot_area(cached_bore_areas[frame_index])
+            perimeter_plot = self._to_plot_length(cached_perimeters[frame_index])
+            bore_surface_plot = self._to_plot_area(cached_bore_surfaces[frame_index])
 
-            surface_area_value = self._estimate_bore_surface_area_from_regression_distance(regression_distance)
-            self.center_bore_surface_area_mm2 = surface_area_value
-            surface_area_value_plot = self._to_plot_area(surface_area_value)
+            ax_plot.imshow(
+                self.grid,
+                extent=[X_plot.min(), X_plot.max(), Y_plot.min(), Y_plot.max()],
+                origin='lower',
+                cmap='Blues',
+                alpha=0.35,
+            )
+            ax_plot.contour(X_plot, Y_plot, self.grid, levels=[0.5], colors=['blue'], linewidths=2.5, linestyles='--')
+
+            ax_plot.imshow(
+                regressed_grid,
+                extent=[X_plot.min(), X_plot.max(), Y_plot.min(), Y_plot.max()],
+                origin='lower',
+                cmap='Reds',
+                alpha=0.35,
+            )
+            ax_plot.contour(X_plot, Y_plot, regressed_grid, levels=[0.5], colors=['red'], linewidths=2.5)
 
             metrics_text = (
-                f'Bore Area: {center_bore_area_plot:.2f} {self.plot_area_unit}\n'
-                f'Perimeter: {inner_perimeter:.2f} {self.plot_length_unit}\n'
-                f'Bore Surface: {surface_area_value_plot:.2f} {self.plot_area_unit}'
+                f'Bore Area: {bore_area_plot:.2f} {self.plot_area_unit}\n'
+                f'Perimeter: {perimeter_plot:.2f} {self.plot_length_unit}\n'
+                f'Bore Surface: {bore_surface_plot:.2f} {self.plot_area_unit}'
             )
-
             ax_plot.text(
                 0.01,
                 0.99,
@@ -1555,129 +1508,40 @@ class FuelGrainRegressionSimulator:
                 ha='left',
                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8),
             )
-            
-            # Draw the largest inscribed circle if it exists
-            if max_circle_center is not None and max_circle_radius > 0:
-                inscribed_circle = Circle(self._to_plot_point(max_circle_center), float(max_circle_radius_plot), 
-                                             fill=False, color='green', linewidth=2.5, 
-                                             linestyle=':', label='Max Inscribed Circle')
-                ax_plot.add_patch(inscribed_circle)
-            
-            # Draw the minimum enclosing circle if it exists
-            if min_enclosing_center is not None and min_enclosing_radius > 0:
-                enclosing_circle = Circle(self._to_plot_point(min_enclosing_center), float(min_enclosing_radius_plot), 
-                                             fill=False, color='orange', linewidth=2, 
-                                             linestyle='-.', label='Min Enclosing Circle')
-                ax_plot.add_patch(enclosing_circle)
-            
-            # Visualize which points on the green circle are touching fuel
-            if max_circle_center is not None and max_circle_radius > 0:
-                from scipy import interpolate
-                
-                # Create interpolation function for fuel grid
-                grid_y = np.arange(regressed_grid.shape[0])
-                grid_x = np.arange(regressed_grid.shape[1])
-                f = interpolate.RegularGridInterpolator((grid_y, grid_x), regressed_grid, bounds_error=False, fill_value=0)
-                
-                # Sample circle perimeter
-                pixel_width = (X[0, 1] - X[0, 0])
-                pixel_height = (Y[1, 0] - Y[0, 0])
-                radius_pixels = max_circle_radius / pixel_width
-                center_pixel_x = (max_circle_center[0] - X[0, 0]) / pixel_width
-                center_pixel_y = (max_circle_center[1] - Y[0, 0]) / pixel_height
-                
-                num_samples = max(int(4 * np.pi * radius_pixels), 200)
-                angles = np.linspace(0, 2 * np.pi, num_samples, endpoint=False)
-                
-                # Collect all fuel values to determine adaptive threshold
-                all_fuel_values = []
-                for angle in angles:
-                    x_pix = center_pixel_x + radius_pixels * np.cos(angle)
-                    y_pix = center_pixel_y + radius_pixels * np.sin(angle)
-                    
-                    if 0 <= y_pix < regressed_grid.shape[0] and 0 <= x_pix < regressed_grid.shape[1]:
-                        fuel_value = f([[y_pix, x_pix]])[0]
-                        all_fuel_values.append(fuel_value)
-                
-                # Use adaptive threshold: 5th percentile of all fuel values on circle perimeter
-                if all_fuel_values:
-                    all_fuel_array = np.array(all_fuel_values)
-                    
-                    if len(all_fuel_array) > 0:
-                        # Use 5th percentile of all detected fuel values (extremely aggressive - catches all weak signals)
-                        adaptive_threshold = np.percentile(all_fuel_array, 5)
-                        # Ensure minimum threshold to avoid pure zeros
-                        adaptive_threshold = max(0.001, adaptive_threshold)
-                    else:
-                        adaptive_threshold = 0.001
-                    
-                    # Find touching points and plot them
-                    touching_x = []
-                    touching_y = []
-                    touching_angles = []
-                    for angle in angles:
-                        x_pix = center_pixel_x + radius_pixels * np.cos(angle)
-                        y_pix = center_pixel_y + radius_pixels * np.sin(angle)
-                        
-                        if 0 <= y_pix < regressed_grid.shape[0] and 0 <= x_pix < regressed_grid.shape[1]:
-                            fuel_value = f([[y_pix, x_pix]])[0]
-                            if fuel_value > adaptive_threshold:  # Use adaptive threshold
-                                x_world = X[0, 0] + x_pix * pixel_width
-                                y_world = Y[0, 0] + y_pix * pixel_height
-                                touching_x.append(x_world)
-                                touching_y.append(y_world)
-                                touching_angles.append(angle)
-                    
-                    # Debug: Analyze contact points per extrusion (5 arms at 72° intervals)
-                    extrusion_contacts = [0] * 5
-                    arm_overlap_lengths = [0.0] * 5
-                    arc_length_per_point = (2 * np.pi * max_circle_radius) / num_samples
-                    
-                    for angle in touching_angles:
-                        arm_idx = int((angle * 180 / np.pi) / 72) % 5
-                        extrusion_contacts[arm_idx] += 1
-                        arm_overlap_lengths[arm_idx] += arc_length_per_point
-                    
-                    # Find the largest arm
-                    largest_arm_idx = np.argmax(extrusion_contacts) if extrusion_contacts else 0
-                    largest_arm_overlap = arm_overlap_lengths[largest_arm_idx]
-                    
-                    print(f"  Threshold: {adaptive_threshold:.6f} | Total: {len(touching_x)}/{len(angles)} | Arms: {extrusion_contacts} | Largest Arm {largest_arm_idx}: {largest_arm_overlap:.2f} mm")
-                    
-                    # Plot touching points in cyan with larger size for visibility
-                    if touching_x:
-                        ax_plot.plot(self._to_plot_length(touching_x), self._to_plot_length(touching_y), 'c.', markersize=5, alpha=0.8, label='Contact Points')
-            
-            # Create manual legend entries
-            from matplotlib.lines import Line2D
-            legend_elements = [
-                Line2D([0], [0], color='blue', linewidth=2.5, linestyle='--', label='Initial'),
-                Line2D([0], [0], color='red', linewidth=2.5, linestyle='-', label='After Regression'),
-                Line2D([0], [0], color='green', linewidth=2.5, linestyle=':', label='Max Inscribed Circle'),
-                Line2D([0], [0], color='orange', linewidth=2, linestyle='-.', label='Min Enclosing Circle'),
-                Line2D([0], [0], color='cyan', marker='.', linestyle='None', markersize=8, label='Contact Points')
-            ]
-            
+
             ax_plot.set_aspect('equal')
             ax_plot.grid(True, alpha=0.3)
             ax_plot.set_xlabel(self._length_label('Distance'), fontsize=12)
             ax_plot.set_ylabel(self._length_label('Distance'), fontsize=12)
-            
-            # Build title with largest arm info
-            largest_arm_text = f' | Largest Arm: {self._to_plot_length(largest_arm_overlap):.2f} {self.plot_length_unit}' if largest_arm_overlap > 0 else ''
-            ax_plot.set_title(f'Fuel Grain Regression | Time: {time_val:.2f} sec | Regression: {self._to_plot_length(regression_distance):.4f} {self.plot_length_unit}', 
-                             fontsize=11, fontweight='bold')
+            ax_plot.set_title(
+                f'Fuel Grain Regression | Time: {times[frame_index]:.2f} sec | '
+                f'Regression: {self._to_plot_length(distances[frame_index]):.4f} {self.plot_length_unit}',
+                fontsize=11,
+                fontweight='bold',
+            )
+
+            from matplotlib.lines import Line2D
+            legend_elements = [
+                Line2D([0], [0], color='blue', linewidth=2.5, linestyle='--', label='Initial'),
+                Line2D([0], [0], color='red', linewidth=2.5, linestyle='-', label='After Regression'),
+            ]
             ax_plot.legend(handles=legend_elements, loc='upper right', fontsize=11)
-            
+
             fig.canvas.draw_idle()
-        
+
+        def update(_):
+            normalized = slider.val / max(float(max_time), 1e-9)
+            frame_index = int(np.clip(round(normalized * (frame_count - 1)), 0, frame_count - 1))
+            draw_frame(frame_index)
+
         slider.on_changed(update)
-        
-        # Initial plot
-        update(0)
-        
-        plt.tight_layout()
-        self._present_plot(fig, "area_vs_regression")
+        draw_frame(0)
+
+        if USE_GUI_PLOTS:
+            fig.canvas.draw_idle()
+            plt.show(block=True)
+        else:
+            self._present_plot(fig, "interactive_regression")
     
     def plot_area_vs_regression(self, max_regression_distance=None):
         """
@@ -1702,30 +1566,37 @@ class FuelGrainRegressionSimulator:
         regression_distances = np.linspace(0, max_regression_distance, num_points)
         regression_distances_plot = self._to_plot_length(regression_distances)
         
-        # Array to store results
-        areas = np.zeros(num_points)
+        # Arrays to store only valid pre-burn-through samples
+        regression_distances_valid = []
+        areas_valid = []
+        burnthrough_distance = None
         
         print(f"Calculating bore area vs regression (this may take a moment)...")
         
         # Calculate bore areas for each regression distance
-        valid_count = 0
         for i, reg_dist in enumerate(regression_distances):
             regressed_grid, _ = self.fast_marching_method(reg_dist, X, Y)
-            areas[i] = self.calculate_center_bore_area(regressed_grid, X, Y)
-            valid_count = i + 1
+            area_value = self.calculate_center_bore_area(regressed_grid, X, Y)
             
             # Stop if bore area reaches 0
-            if areas[i] <= 0:
+            if area_value <= 0:
+                burnthrough_distance = float(reg_dist)
                 print(f"  Bore area reached zero at regression distance {reg_dist:.4f} mm")
                 break
+
+            regression_distances_valid.append(float(reg_dist))
+            areas_valid.append(float(area_value))
             
             if (i + 1) % 10 == 0:
                 print(f"  Progress: {i+1}/{num_points}")
-        
-        # Trim arrays to valid data only
-        regression_distances = regression_distances[:valid_count]
-        areas = areas[:valid_count]
-        regression_distances_plot = regression_distances_plot[:valid_count]
+
+        if len(areas_valid) == 0:
+            print("WARNING: No valid bore area data points found; skipping area plot.")
+            return np.array([0, 0, 0])
+
+        regression_distances = np.asarray(regression_distances_valid, dtype=float)
+        areas = np.asarray(areas_valid, dtype=float)
+        regression_distances_plot = self._to_plot_length(regression_distances)
         areas_plot = self._to_plot_area(areas)
         
         # Fit polynomial with adaptive degree based on R² threshold
@@ -1756,9 +1627,6 @@ class FuelGrainRegressionSimulator:
         ax.spines['right'].set_visible(False)
         
         # Add statistics to the plot
-        if len(areas) == 0:
-            print("WARNING: No valid bore area data points found; skipping area plot.")
-            return np.array([0, 0, 0])
         initial_area = areas[0]
         final_area = areas[-1]
         
@@ -1775,6 +1643,8 @@ class FuelGrainRegressionSimulator:
         stats_text += f'Final Bore Area: {areas_plot[-1]:.2f} {self.plot_area_unit}\n'
         stats_text += f'Bore Area Change: {areas_plot[-1] - areas_plot[0]:.2f} {self.plot_area_unit}\n'
         stats_text += f'Max Regression: {self._to_plot_length(max_regression_distance):.2f} {self.plot_length_unit}\n'
+        if burnthrough_distance is not None:
+            stats_text += f'Burn-through: {self._to_plot_length(burnthrough_distance):.2f} {self.plot_length_unit}\n'
         stats_text += f'Polynomial Degree: {degree_used}\n\n'
         stats_text += self._format_polynomial_equation(coeffs, degree_used, 'A', self.plot_area_scale_mm2, r2)
         
@@ -1790,6 +1660,8 @@ class FuelGrainRegressionSimulator:
         print(f"  Initial bore area: {areas_plot[0]:.2f} {self.plot_area_unit}")
         print(f"  Final bore area: {areas_plot[-1]:.2f} {self.plot_area_unit}")
         print(f"  Bore area change: {areas_plot[-1] - areas_plot[0]:.2f} {self.plot_area_unit}")
+        if burnthrough_distance is not None:
+            print(f"  Burn-through regression distance: {self._to_plot_length(burnthrough_distance):.2f} {self.plot_length_unit}")
         print(f"  Polynomial degree: {degree_used}")
         print(f"  R² (goodness of fit): {r2:.6f}")
         
@@ -2821,11 +2693,11 @@ class FuelGrainRegressionSimulator:
 def main():
     """Main execution function"""
     # Configuration
-    obj_file = r'C:\Users\gosha\Desktop\MotorModelP2\Hybrid Rocket model\goshastar.obj'  # Path to the OBJ file
+    obj_file = r'C:\Users\gosha\Desktop\MotorModelP2\Hybrid Rocket model\goddard.obj'  # Path to the OBJ file
     outer_diameter_inches = 6.74  # Will be overridden by actual geometry
     regression_rate = 3  # mm/sec
     time_seconds = 40  # seconds
-    cross_section_axis = 1 # 0=X, 1=Y, 2=Z (Z is top-down view)
+    cross_section_axis = 2 # 0=X, 1=Y, 2=Z (Z is top-down view)
     plot_length_unit = 'mm'  # Change to 'cm', 'm', or 'in' for graph display only
     plot_area_unit = None  # Leave as None to derive area units from plot_length_unit
     export_regressed_obj_after_mm = None  # Example: 60 to export after 60 mm of regression
@@ -2877,6 +2749,16 @@ def main():
     print(f"  Pixel size: {mm_per_pixel:.4f} mm/pixel")
     print(f"  Initial bore surface area: {initial_center_bore_surface_area:.2f} mm²")
     print(f"  Live bore surface area: {center_bore_surface_area:.2f} mm²")
+
+    burnthrough_regression_mm = simulator.find_burnthrough_regression_distance(
+        X,
+        Y,
+        max_regression_distance=max(simulator.id_radius, regression_distance),
+    )
+    if burnthrough_regression_mm is not None:
+        print(f"  Burn-through regression distance: {burnthrough_regression_mm:.4f} mm")
+    else:
+        print("  Burn-through regression distance: not reached in tested range")
 
     if export_regressed_obj_after_mm is not None:
         print(f"\nExporting regressed OBJ after {export_regressed_obj_after_mm} mm of regression...")
