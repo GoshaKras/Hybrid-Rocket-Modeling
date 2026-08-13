@@ -2693,11 +2693,11 @@ class FuelGrainRegressionSimulator:
 def main():
     """Main execution function"""
     # Configuration
-    obj_file = r'C:\Users\gosha\Desktop\MotorModelP2\Hybrid Rocket model\goddard.obj'  # Path to the OBJ file
+    obj_file = r'C:\Users\gosha\Desktop\MotorModelP2\Hybrid Rocket model\goshastar.obj'  # Path to the OBJ file
     outer_diameter_inches = 6.74  # Will be overridden by actual geometry
     regression_rate = 3  # mm/sec
     time_seconds = 40  # seconds
-    cross_section_axis = 2 # 0=X, 1=Y, 2=Z (Z is top-down view)
+    cross_section_axis = 1 # 0=X, 1=Y, 2=Z (Z is top-down view)
     plot_length_unit = 'mm'  # Change to 'cm', 'm', or 'in' for graph display only
     plot_area_unit = None  # Leave as None to derive area units from plot_length_unit
     export_regressed_obj_after_mm = None  # Example: 60 to export after 60 mm of regression

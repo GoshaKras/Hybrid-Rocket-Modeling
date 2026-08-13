@@ -1,4 +1,5 @@
 import time as time_module
+import json
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -16,14 +17,14 @@ from skimage.draw import polygon
 from skimage import measure
 import trimesh
 from scipy import ndimage
-from fuel_grain_regression2 import FuelGrainRegressionSimulator
+import attempyforfgreg as regression_3d
 
 
 
 
 
 class FuelGrain():
-    def __init__(self,FuelGrainDiameter,fuelGrain_AreaReal,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,HowmuchInj_Help,Is_fuelGrain_Helix,helixrundiameter,Is_fuelgrain_Transient,Is_start_mass_gas_input,StartMass_Gas,Is_FuelGrain_GoshaStar,OneArchlengthestimate,preccandpostvolume,start_gas_gpermole,RealTime,Is_FuelGrain_PixelMethod,helixloopdiameter,plot_length_unit='mm',plot_area_unit=None):
+    def __init__(self,FuelGrainDiameter,fuelGrain_AreaReal,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,HowmuchInj_Help,Is_fuelGrain_Helix,helixrundiameter,Is_fuelgrain_Transient,Is_start_mass_gas_input,StartMass_Gas,Is_FuelGrain_GoshaStar,OneArchlengthestimate,preccandpostvolume,start_gas_gpermole,RealTime,Is_FuelGrain_PixelMethod,helixloopdiameter,plot_length_unit='mm',plot_area_unit=None,effectivelengthconstant=None):
         
         self.time=RealTime
         self.diameter_grain=FuelGrainDiameter
@@ -35,6 +36,9 @@ class FuelGrain():
         self.regression2=None
         self.reg3=None
         self.maybe_A=None
+        self.initial_surface_area=None
+        self.intail_surface_area=None
+        self.surface_area_coeffs=None
         self.BlowingCo=0
         self.use_blowingco=0
         self.prandtl_number=None
@@ -55,6 +59,7 @@ class FuelGrain():
         self.regression_M_persec_withratio=None
         self.regression_MM_persec_withratio=None
         self.flowrateRatio_Use=1
+        self.effectivelengthconstant=effectivelengthconstant
         if Is_fuelGrain_Helix==True:  #fix this
             self.chamberDensity=None
             self.streamvelocity=None
@@ -179,6 +184,7 @@ class FuelGrain():
             self.plot_length_unit = plot_length_unit
             self.plot_area_unit = plot_area_unit
             
+            
         
             
             
@@ -210,33 +216,7 @@ class FuelGrain():
             self.HelixP_meters=(self.helixlength_meters/revPitch)
             self.RC=(self.helixloopdiameter/2)*(1+(self.HelixP_meters/(3.14*self.helixloopdiameter))**2)
 
-    def _effective_burn_length(self, axial_length):
-        if axial_length is None or axial_length <= 0:
-            return axial_length
-
-        stretch_multiplier = 1.0
-
-        helix_length = getattr(self, "helixlength_meters", None)
-        if getattr(self, "Is_helix", False) and helix_length is not None and helix_length > 0:
-            stretch_multiplier = max(stretch_multiplier, float(helix_length) / float(axial_length))
-
-        helix_radius = getattr(self, "helixloopdiameter", None)
-        helix_curvature_radius = getattr(self, "RC", None)
-        if (
-            getattr(self, "Is_helix", False)
-            and helix_radius is not None
-            and helix_radius > 0
-            and helix_curvature_radius is not None
-            and helix_curvature_radius > 0
-        ):
-            stretch_multiplier = max(stretch_multiplier, float(helix_curvature_radius) / float(helix_radius / 2.0))
-
-        helix_correction = getattr(self, "CFratio", None)
-        if getattr(self, "Is_helix", False) and helix_correction is not None and helix_correction > 0:
-            stretch_multiplier = max(stretch_multiplier, float(helix_correction))
-
-        return axial_length * stretch_multiplier
-        
+    
 
 
 
@@ -325,7 +305,7 @@ class FuelGrain():
         self.newraduis=self.oldraduis
         self.newarea=self.oldarea
         self.testRad=self.oldraduis
-        self.insurfacearea2=self.oldpermeter*self._effective_burn_length(Fuelgrainlength)
+        self.insurfacearea2=self.oldpermeter*Fuelgrainlength*self.effectivelengthconstant
         self.testArea=TotalComplexArea
         self.testCircum=ComplexPerimeter
         
@@ -342,12 +322,6 @@ class FuelGrain():
 
 
     def oxflux_func(self,RealMassFlowrate,RealTime):
-        if self.Is_pixel==True:
-            self.oxflux=(RealMassFlowrate+self.mdotfuel*(self.fuelregcon))/(self.pixelAREA)
-           # self.oxflux=RealMassFlowrate/self.area_grain #fix later
-            #print(RealMassFlowrate,self.area_grain,self.oxflux)
-        else:    
-            self.oxflux=RealMassFlowrate/self.area_grain
         self.time=RealTime
         self.oxflux=RealMassFlowrate/self.area_grain
     def regression_func (self,Status,Regression_Aco,Regression_Nco,regfluxstuff,Timestep):
@@ -362,24 +336,41 @@ class FuelGrain():
         self.totalregression_MM=self.totalrgession*1000/2 #for pixel method
     def simpleCircleGeo(self,FuelGrainLength,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix):
         self.portperimeter= self.diameter_grain*3.14
-        effective_length = self._effective_burn_length(FuelGrainLength)
-        self.insurfacearea=self.portperimeter*effective_length
+        
+        self.insurfacearea=self.portperimeter*self.effectivelengthconstant
         self.diameter_grain=self.diameter_grain+(self.regression_M_persec*Timestep*2)
         self.fuelgrain_raduis=self.diameter_grain/2
         self.area_grain=(self.fuelgrain_raduis*self.fuelgrain_raduis*3.14)
         self.volume_grain=self.area_grain*FuelGrainLength
         if Is_FuelGrain_GoshaStar==True:
             self.area_grain=self.eQarea
-            self.insurfacearea=self.complexcircum*effective_length
+            self.insurfacearea=self.complexcircum*FuelGrainLength*self.effectivelengthconstant
         if self.Is_pixel==True:
             self.area_grain=self.pixelAREA
-            self.insurfacearea=self.P_perimeter*effective_length
+            self.insurfacearea=self.P_perimeter*FuelGrainLength*self.effectivelengthconstant
         if Is_fuelGrain_Helix==True:
             self.surfaceareaadd=0
             self.addtoarea_bcHelix=0
                          
         self.volume_grain=self.area_grain*FuelGrainLength
-    def pixelmethodgeo(self,Is_fuelGrain_Helix,FuelGrainLength,Fuel_Density,Timestep,amountofsmallcircles):
+    def _store_initial_surface_area(self, surface_area_m2=None):
+        """Store the initial inner surface area in both spelling variants for downstream use."""
+        if surface_area_m2 is None:
+            if self.surface_area_coeffs is not None:
+                surface_area_mm2 = float(np.polyval(self.surface_area_coeffs, 0.0))
+                surface_area_m2 = max(surface_area_mm2, 0.0) / (1000.0 * 1000.0)
+            elif self.P_surfacearea is not None:
+                surface_area_m2 = float(self.P_surfacearea)
+            else:
+                surface_area_m2 = None
+
+        if surface_area_m2 is not None:
+            self.initial_surface_area = float(surface_area_m2)
+            self.intail_surface_area = float(surface_area_m2)
+        print(f"Initial inner surface area stored: {self.initial_surface_area:.6f} m²")
+        return self.initial_surface_area
+
+    def pixelmethodgeo(self,Is_fuelGrain_Helix,FuelGrainLength,Fuel_Density,Timestep,amountofsmallcircles,effectivelengthconstant,Override_effectivelengthconstant):
         """
         Calculate pixel method geometry using polynomial curve fits from regression analysis.
         Uses 2nd-degree polynomial fits for area and perimeter extracted from the OBJ geometry.
@@ -429,7 +420,7 @@ class FuelGrain():
         # Area calculation (mm²) from polynomial fit - uses np.polyval for variable degree
         self.pixelAREA = np.polyval(area_coeffs, x)
         self.pixelAREA = max(0, self.pixelAREA)  # Ensure non-negative
-        self.pixelAREA=(self.Areabasedon_OuterDiameter_mm - self.pixelAREA)/(1000*1000)  # Subtract from initial area based on OD
+        self.pixelAREA=self.pixelAREA/(1000*1000)  # Subtract from initial area based on OD
       
         if self.time>Timestep:
             self.oldarea2=self.P_eqraduis*self.P_eqraduis*3.14
@@ -444,8 +435,17 @@ class FuelGrain():
         self.P_perimeter = np.polyval(perimeter_coeffs, x)
         self.P_perimeter = max(0, self.P_perimeter)
         self.P_perimeter=self.P_perimeter/1000  # Ensure non-negative
-        effective_length = self._effective_burn_length(FuelGrainLength)
-        self.P_surfacearea=self.P_perimeter*effective_length
+        if self.time==Timestep and self.Is_helix==True:
+            
+            self.effectivelengthconstant=self.initial_surface_area/(self.P_perimeter*FuelGrainLength)
+            self.P_surfacearea=self.initial_surface_area
+        else:
+            self.P_surfacearea=self.P_perimeter*FuelGrainLength
+        if Override_effectivelengthconstant==True:
+            self.effectivelengthconstant=effectivelengthconstant
+        self.insurfacearea=self.P_surfacearea
+        if self.initial_surface_area is None:
+            self._store_initial_surface_area(self.P_surfacearea)
         
         # Max inscribed circle diameter calculation (mm) from polynomial fit - uses np.polyval for variable degree
         self.P_max_inscribed_diameter = np.polyval(max_inscribed_coeffs, x)
@@ -478,8 +478,9 @@ class FuelGrain():
         
         self.Howcircle=1/(self.P_eqPerimeter/self.P_perimeter)
         if self.time>=Timestep:
-            self.p_mdotfuel=(self.P_perimeter+self.oldpixelcircum)*Fuel_Density*effective_length*self.regression_M_persec_withratio*0.5
-
+            self.p_mdotfuel=((self.pixelAREA-self.oldarea)*Fuel_Density*FuelGrainLength*self.effectivelengthconstant)/Timestep
+        self.oldsurfacearea=self.P_surfacearea
+        self.oldarea=self.pixelAREA
         self.oldpixelcircum=self.P_perimeter
         self.diameter_minmax_diff=self.P_min_enclosing_diameter - self.P_max_inscribed_diameter
         
@@ -499,7 +500,7 @@ class FuelGrain():
        # if Is_fuelGrain_Helix==True:
            # self.insurfacearea = self.insurfacearea + self.surfaceareaadd
 
-    def run_regression_analysis(self, obj_file_path, regression_rate=3.0, time_seconds=30, cross_section_axis=2, show_plots=True, plot_length_unit=None, plot_area_unit=None):
+    def _run_regression_analysis_legacy(self, obj_file_path, regression_rate=3.0, time_seconds=30, cross_section_axis=2, show_plots=True, plot_length_unit=None, plot_area_unit=None):
         """
         Run full fuel grain regression analysis with all graphs and curve fits.
         This will display area, perimeter, and inscribed circle diameter graphs.
@@ -577,6 +578,11 @@ class FuelGrain():
         # Display perimeter vs regression graph and capture coefficients
         print("Generating perimeter vs regression graph...")
         self.perimeter_coeffs = simulator.plot_perimeter_vs_regression(max_regression_distance=simulator.id_radius)
+
+        # Display surface area vs regression graph and capture coefficients
+        print("Generating surface area vs regression graph...")
+        self.surface_area_coeffs = simulator.plot_surface_area_vs_regression(max_regression_distance=simulator.id_radius)
+        self._store_initial_surface_area()
         
         # Display max inscribed circle vs regression graph and capture coefficients
         print("Generating max inscribed circle diameter vs regression graph...")
@@ -605,12 +611,100 @@ class FuelGrain():
             if _plt_was_interactive:
                 plt.ion()
 
+    def run_regression_analysis(self, obj_file_path, regression_rate=3.0, time_seconds=30,
+                                cross_section_axis=2, show_plots=True, plot_length_unit=None,
+                                plot_area_unit=None, in_plane_resolution=500,
+                                length_resolution=200, unit_scale_mm=None,
+                                graph_points=101, snapshot_regression_mm=None,
+                                snapshot_path=None, show_plane_preview=False,
+                                open_interactive_viewer=False):
+        """Build pixel-method geometry fits from the accurate 3-D voxel regression model.
+
+        This replaces the 2-D ``FuelGrainRegressionSimulator`` dependency for
+        port area, burnable perimeter, burning surface area, and inscribed
+        diameter. Coefficients use regression distance in millimetres.
+        """
+        obj_path = regression_3d.Path(obj_file_path)
+        if not obj_path.is_file():
+            raise FileNotFoundError(f"OBJ file not found: {obj_path}")
+        if cross_section_axis not in (0, 1, 2):
+            raise ValueError("cross_section_axis must be 0 (X), 1 (Y), or 2 (Z)")
+
+        if in_plane_resolution < 20 or length_resolution < 2 or graph_points < 3:
+            raise ValueError("in_plane_resolution >=20, length_resolution >=2, and graph_points >=3 are required")
+        scale_to_mm = regression_3d.infer_unit_scale_to_mm(obj_path, unit_scale_mm)
+        mesh = regression_3d.load_mesh(obj_path, scale_to_mm)
+        if show_plots and show_plane_preview:
+            cross_section_axis = regression_3d.preview_high_resolution_plane(
+                mesh, cross_section_axis, in_plane_resolution
+            )
+        axis_name = ("X", "Y", "Z")[cross_section_axis]
+        print(f"3-D regression: plots {'will show' if show_plots else 'will not show'}.")
+        print(f"3-D regression plane: {axis_name}; raster: {in_plane_resolution} x "
+              f"{in_plane_resolution}; length slices: {length_resolution}.")
+        with regression_3d.activity_indicator("Rasterizing high-resolution cross-sections...", len(mesh.faces)):
+            solid, pitch = regression_3d.make_solid_voxels(
+                mesh, cross_section_axis, in_plane_resolution, length_resolution
+            )
+        initial_port = regression_3d.central_port_mask(solid, cross_section_axis)
+        if snapshot_regression_mm is not None:
+            regression_3d.export_regressed_fuel_snapshot(
+                solid, initial_port, pitch, float(snapshot_regression_mm),
+                regression_3d.Path(snapshot_path or "regression_outputs/regressed_fuel_snapshot.obj"),
+            )
+        max_regression_mm = regression_rate * time_seconds
+        distances = np.linspace(0.0, max_regression_mm, graph_points)
+        plane_rows = regression_3d.picked_plane_regression(
+            solid, initial_port, pitch, cross_section_axis, distances
+        )
+        surface_rows = regression_3d.regression_table(
+            solid, initial_port, pitch, cross_section_axis, distances,
+            mesh_volume=float("nan"), mesh_area=float(mesh.area),
+            initial_bore_area=regression_3d.mesh_bore_surface_area(mesh, cross_section_axis),
+        )
+        x = distances
+
+        def fit_metric(rows, key):
+            values = np.asarray([row[key] for row in rows], dtype=float)
+            degree = min(5, len(x) - 1)
+            return np.polyfit(x, values, degree)
+
+        self.area_coeffs = fit_metric(plane_rows, "port_area_mm2")
+        self.perimeter_coeffs = fit_metric(plane_rows, "port_perimeter_mm")
+        self.max_inscribed_coeffs = fit_metric(plane_rows, "max_inscribed_diameter_mm")
+        self.min_enclosing_coeffs = fit_metric(plane_rows, "min_enclosing_diameter_mm")
+        self.circle_overlap_coeffs = fit_metric(plane_rows, "circle_boundary_overlap_mm")
+        self.largest_arm_coeffs = fit_metric(plane_rows, "largest_arm_contact_mm")
+        self.surface_area_coeffs = fit_metric(surface_rows, "burning_surface_area_mm2")
+        self._store_initial_surface_area(float(surface_rows[0]["burning_surface_area_mm2"]) / 1_000_000.0)
+
+        print("3-D regression geometry loaded into FuelGrain:")
+        print(f"  plane: {('X', 'Y', 'Z')[cross_section_axis]}; grid: {tuple(solid.shape)}")
+        print(f"  fitted range: 0 to {max_regression_mm:.3f} mm")
+        if show_plots:
+            display_unit, display_scale = regression_3d.display_unit_scale(
+                self.plot_length_unit if plot_length_unit is None else plot_length_unit
+            )
+            if open_interactive_viewer:
+                regression_3d.show_interactive_viewer(
+                    solid, initial_port, pitch, distances, surface_rows, cross_section_axis,
+                    regression_rate, display_unit, display_scale,
+                )
+            regression_3d.save_picked_plane_analysis(
+                plane_rows, cross_section_axis, None, display_unit, display_scale,
+                regression_3d.Path("regression_outputs") / "fuelgrain_3d_plane_data.csv",
+                regression_3d.Path("regression_outputs") / "fuelgrain_3d_curve_fits.csv", show=True,
+            )
+
     def masses_of_stuff(self, Fuel_Density, OxtankMath,Timestep, FuelGrainLength):
         
         #self.mdotfuel=self.insurfacearea2*self.regression_M_persec*Fuel_Density#*self.flowrateRatio_Use
         if self.Is_pixel==True :
-            #self.mdotfuel=(self.P_perimeter+self.oldpixelcircum)*Fuel_Density*FuelGrainLength*self.regression_M_persec_withratio*0.5
-            self.mdotfuel=self.P_perimeter*Fuel_Density*FuelGrainLength*self.regression_M_persec_withratio
+            # If it's the first time step, calculate the mass flow rate
+            if self.time==Timestep:
+                self.mdotfuel=(self.P_perimeter+self.oldpixelcircum)*Fuel_Density*FuelGrainLength*self.regression_M_persec_withratio*0.5
+            else:
+                self.mdotfuel=self.p_mdotfuel
             #self.oldpixelcircum=self.P_perimeter
         else:
             self.mdotfuel=self.insurfacearea*Fuel_Density*self.regression_M_persec_withratio
@@ -811,8 +905,8 @@ class FuelGrain():
         self.anothermdot= (self.testCircum*Fuel_Density*FuelGrainLength*self.regression_M_persec_withratio) 
         self.modratio=self.Howcircle/self.mod_circcheck
         
-        effective_length = self._effective_burn_length(FuelGrainLength)
-        self.insurfacearea2=self.testCircum*effective_length
+        
+        self.insurfacearea2=self.testCircum*FuelGrainLength*self.effectivelengthconstant
         self.anothermdot= self.insurfacearea2*Fuel_Density*self.regression_M_persec_withratio
         self.mdotdiff=abs(1-(self.anothermdot/self.mdotfuel))*100
         self.circumdiff=abs(1-(self.testCircum/self.P_perimeter))*100
@@ -912,7 +1006,7 @@ class FuelGrain():
     
 
 
-    def load_obj_file_geometry(self, obj_file_path, outer_diameter_inches=5.0, resolution=500, cross_section_axis=2, cross_section_pos=None):
+    def _load_obj_file_geometry_legacy(self, obj_file_path, outer_diameter_inches=5.0, resolution=500, cross_section_axis=2, cross_section_pos=None):
         """
         Load an OBJ file and extract starting area, inner port area, and perimeter.
         Uses FuelGrainRegressionSimulator from fuel_grain_regression.py
@@ -997,11 +1091,46 @@ class FuelGrain():
         
         return results
 
+    def load_obj_file_geometry(self, obj_file_path, outer_diameter_inches=5.0, resolution=500,
+                               cross_section_axis=2, cross_section_pos=None):
+        """Return initial selected-plane geometry from the 3-D regression rasterizer."""
+        if cross_section_pos is not None:
+            raise NotImplementedError("The 3-D loader currently measures the centre slice only")
+        obj_path = regression_3d.Path(obj_file_path)
+        mesh = regression_3d.load_mesh(obj_path, regression_3d.infer_unit_scale_to_mm(obj_path, None))
+        solid, pitch = regression_3d.make_solid_voxels(mesh, cross_section_axis, resolution, 200)
+        port = regression_3d.central_port_mask(solid, cross_section_axis)
+        index = solid.shape[cross_section_axis] // 2
+        port_area, inner_perimeter = regression_3d.slice_metrics(port, solid, cross_section_axis, index, pitch)
+        plane_axes = [number for number in range(3) if number != cross_section_axis]
+        fuel_area = float(np.count_nonzero(np.take(solid, index, axis=cross_section_axis)) *
+                          np.prod(pitch[plane_axes]))
+        outer_perimeter = regression_3d.slice_metrics(~np.take(solid, index, axis=cross_section_axis)[None, ...],
+                                                       np.take(solid, index, axis=cross_section_axis)[None, ...],
+                                                       0, 0, np.array([1.0, *pitch[plane_axes]]))[1]
+        results = {
+            "starting_area_mm2": fuel_area,
+            "inner_perimeter_mm": inner_perimeter,
+            "outer_perimeter_mm": outer_perimeter,
+            "inner_port_diameter_mm": 4.0 * port_area / inner_perimeter if inner_perimeter else 0.0,
+            "outer_diameter_mm": float(max(mesh.extents[plane_axes])),
+            "center_x_mm": float(np.mean(mesh.bounds[:, plane_axes[0]])),
+            "center_y_mm": float(np.mean(mesh.bounds[:, plane_axes[1]])),
+        }
+        print(f"3-D initial geometry: port area {port_area:.2f} mm^2; inner perimeter {inner_perimeter:.2f} mm")
+        return results
+
     def add_values(self):
         row = {}
         for attr in self._init_attrs:  
             val = getattr(self, attr)
-            row[attr] = val
+            # Convert numpy arrays and lists to JSON strings for proper CSV serialization
+            if isinstance(val, np.ndarray):
+                row[attr] = json.dumps(val.tolist())
+            elif isinstance(val, list):
+                row[attr] = json.dumps(val)
+            else:
+                row[attr] = val
         self._output_rows.append(row)
     
     def finalize_output(self):

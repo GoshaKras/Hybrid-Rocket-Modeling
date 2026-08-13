@@ -110,6 +110,34 @@ df_cdinput=pd.read_csv(inputcdcsv)
 ShowPlots = True  # default: controls pixel-method plotting; may be overridden by vertical inputs
 PlotLengthUnit = 'mm'
 PlotAreaUnit = None
+# 3-D fuel-grain regression defaults. These remain available when vertical
+# inputs are enabled; add matching fields to the vertical CSV to override them.
+OBJ_FILE = "goshastar.obj"            # OBJ fuel-grain file in this folder
+# The named plane is high resolution; its normal is the lower-resolution
+# length direction. Example: "X" means a detailed Y-Z slice.
+HIGH_RESOLUTION_PLANE = "Y"            # "X", "Y", or "Z"
+IN_PLANE_RESOLUTION = 500               # Pixels across each selected-plane direction
+LENGTH_RESOLUTION = 200                 # Number of slices along the selected plane normal
+REGRESSION_RATE_MM_PER_S = 1.0          # Normal fuel regression rate used to build fits
+SIMULATION_TIME_S = 50.0                # Total regression time used to build fits
+SLIDER_STEPS = 11                       # Standalone viewer setting; motor fits use graph points below
+DISPLAY_LENGTH_UNIT = "mm"              # "mm", "cm", "m", or "in" for plots/viewer labels
+OPEN_INTERACTIVE_VIEWER = True          # Open the X/Y/Z interactive viewer after calculation
+SMOOTH_VIEWER_RENDERING = False         # Smooth displayed slice edges; does not alter calculations
+SHOW_PLANE_PREVIEW = True               # Show plane picker before the long rasterization
+SAVE_SELECTED_PLANE_ANALYSIS = True     # Generate selected-plane CSV plus curve-fit plots
+SELECTED_PLANE_ANALYSIS_PLOT = "selected_plane_regression.png"  # Core plot PNG name
+SELECTED_PLANE_ANALYSIS_CSV = "selected_plane_regression.csv"   # Measurement CSV name
+SELECTED_PLANE_CURVE_FITS_CSV = "selected_plane_curve_fits.csv" # Piecewise-fit CSV name
+SAVE_SELECTED_PLANE_ANALYSIS_PLOT = True  # Write curve-fit PNG files to disk
+SHOW_SELECTED_PLANE_ANALYSIS_AFTER_VIEWER = True  # Open curve-fit windows after slider closes
+SHOW_CURVE_FIT_EQUATIONS_ON_PLOTS = False  # Show equations in graph panels; CSV always includes them
+SELECTED_PLANE_GRAPH_POINTS = 50        # Regression samples used for selected-plane curves/fits
+STOP_SELECTED_PLANE_GRAPHS_WHEN_FUEL_IS_GONE = True  # Stop graph/fit at first empty selected-plane slice
+OUTPUT_FOLDER = "regression_outputs"    # Folder for generated CSV and PNG files
+EXPORT_REGRESSED_SNAPSHOT_MM = None     # Set (for example) 25.0 to export remaining fuel as OBJ
+REGRESSED_SNAPSHOT_FILENAME = "regressed_fuel_snapshot.obj"  # Snapshot OBJ filename
+UNIT_SCALE_MM = None                    # None = auto-detect; metres=1000, millimetres=1
 
 USE_VERTICAL_INPUTS = True # Set to True to load from vertical CSV, False to use hardcoded values
 VERTICAL_INPUTS_FILE = 'inputs_vertical_sample1.csv'
@@ -187,9 +215,7 @@ else:
         Is_print_pixelstuff=False
         Is_fullshape_on_helix=False
         # Toggle to show or hide pixel-method plots during regression analysis
-        ShowPlots = False
-        
-        
+        ShowPlots = True
         #Injector Inputs
         InjectorArea=0.00010716494696 #m^2
         DischargeCo_SPI=0.65
@@ -277,6 +303,8 @@ if True:
     Use_U=True
     isventopen=True
     Whole_thing_helix= False
+    effectivelengthconstant=1
+    Override_effectivelengthconstant=True
     #OuterDiameter_inches=10.5 #change if csv is different
     
     #stuff to add to csv
@@ -560,8 +588,8 @@ if True:
     InjectirDiameter_m=(np.sqrt(InjectorArea/3.14))*2
 
 #If you want stuff printed do it here
-print(PressureDiff_PA,PressureDiff_Psi,AreaNeededForMass_Injector,MassFlowRate_SPI,InjectirDiameter_m)
-print(InjectorArea)
+#print(PressureDiff_PA,PressureDiff_Psi,AreaNeededForMass_Injector,MassFlowRate_SPI,InjectirDiameter_m)
+#print(InjectorArea)
 
 #Inputs for math...
 NitrousQuality=0
@@ -587,7 +615,8 @@ OxtankMath=Oxtank(RealTime,Oxtanktemp,NitrousQuality,StartMass_Gas,StartMass_Liq
 OxtankMath.StuffNoPrint(OxtankVolume, Timestep, oxtankLstart,hydroD=HydrolicDiameter,isventopen=isventopen)
 
 
-FuelGrainMath=FuelGrain(FuelGrainDiameter,fuelGrain_AreaReal,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,HowmuchInj_Help,Is_fuelGrain_Helix,helixrundiameter,Is_fuelgrain_Transient,Is_start_mass_gas_input,StartMass_Gas,Is_FuelGrain_GoshaStar,OneArchlengthestimate,preccandpostvolume,start_gas_gpermole,RealTime,Is_FuelGrain_PixelMethod,helixloopdiameter=helixloopdiameter,plot_length_unit=PlotLengthUnit,plot_area_unit=PlotAreaUnit)
+
+FuelGrainMath=FuelGrain(FuelGrainDiameter,fuelGrain_AreaReal,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,HowmuchInj_Help,Is_fuelGrain_Helix,helixrundiameter,Is_fuelgrain_Transient,Is_start_mass_gas_input,StartMass_Gas,Is_FuelGrain_GoshaStar,OneArchlengthestimate,preccandpostvolume,start_gas_gpermole,RealTime,Is_FuelGrain_PixelMethod,helixloopdiameter=helixloopdiameter,plot_length_unit=PlotLengthUnit,plot_area_unit=PlotAreaUnit,effectivelengthconstant=effectivelengthconstant)
 FuelGrainMath.stuffnoprint(Is_FuelGrain_PixelMethod,outerdiameter_inches=OuterDiameter_inches,totalComplexArea=TotalComplexArea,Is_fuelGrain_Helix=Is_fuelGrain_Helix,revPitch=revPitch,PitchFor_Helix=PitchFor_Helix)
 FuelGrainMath.should_I_Print(Is_fuelGrain_Helix,Is_fuelgrain_Transient,Is_FuelGrain_GoshaStar,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,start_gas_gpermole,Is_start_mass_gas_input,StartMass_Gas,OneArchlengthestimate,helixrundiameter)
 
@@ -600,8 +629,40 @@ if Is_sim_flight==True: #fix later
     flighmath=Flight(wetmass,drymass,rocketareaM,startingoutsidetempC,PressureOutsidePa,TempchangePerMeter,realativehumidity,dragcoIfnotcdchart,df_cdinput,drouge_cd,drouge_area,infaltionint,infaltiontime,main_cd,main_area,maindelpyalt,Timestep,RealTime)
     flighmath.stuffnotprint(rocketareaM)
     if Is_FuelGrain_PixelMethod==True:
+        print(f"Fuel-grain regression plots {'will show' if ShowPlots else 'will not show'}.")
+        print(f"  Plane picker: {'on' if ShowPlots and SHOW_PLANE_PREVIEW else 'off'}; "
+              f"slider viewer: {'on' if ShowPlots and OPEN_INTERACTIVE_VIEWER else 'off'}.")
         # Run full regression analysis with all graphs (controlled by ShowPlots)
-        FuelGrainMath.run_regression_analysis(r'C:\Users\gosha\Desktop\MotorModelP2\cads\Goddard.obj', cross_section_axis=2, show_plots=ShowPlots, plot_length_unit=PlotLengthUnit, plot_area_unit=PlotAreaUnit)
+        # Keep the shared 3-D regression module's output/plot behaviour in
+        # sync with the settings above when the motor model requests plots.
+        import attempyforfgreg as regression_3d
+        regression_3d.SAVE_SELECTED_PLANE_ANALYSIS = SAVE_SELECTED_PLANE_ANALYSIS
+        regression_3d.SAVE_SELECTED_PLANE_ANALYSIS_PLOT = SAVE_SELECTED_PLANE_ANALYSIS_PLOT
+        regression_3d.SHOW_SELECTED_PLANE_ANALYSIS_AFTER_VIEWER = SHOW_SELECTED_PLANE_ANALYSIS_AFTER_VIEWER
+        regression_3d.SHOW_CURVE_FIT_EQUATIONS_ON_PLOTS = SHOW_CURVE_FIT_EQUATIONS_ON_PLOTS
+        regression_3d.STOP_SELECTED_PLANE_GRAPHS_WHEN_FUEL_IS_GONE = STOP_SELECTED_PLANE_GRAPHS_WHEN_FUEL_IS_GONE
+        regression_3d.OUTPUT_FOLDER = OUTPUT_FOLDER
+        regression_3d.SMOOTH_VIEWER_RENDERING = SMOOTH_VIEWER_RENDERING
+        plane_name = HIGH_RESOLUTION_PLANE.strip().upper()
+        if plane_name not in ("X", "Y", "Z"):
+            raise ValueError("HIGH_RESOLUTION_PLANE must be X, Y, or Z")
+        FuelGrainMath.run_regression_analysis(
+            OBJ_FILE,
+            regression_rate=REGRESSION_RATE_MM_PER_S,
+            time_seconds=SIMULATION_TIME_S,
+            cross_section_axis=("X", "Y", "Z").index(plane_name),
+            show_plots=ShowPlots,
+            plot_length_unit=DISPLAY_LENGTH_UNIT,
+            plot_area_unit=PlotAreaUnit,
+            in_plane_resolution=IN_PLANE_RESOLUTION,
+            length_resolution=LENGTH_RESOLUTION,
+            unit_scale_mm=UNIT_SCALE_MM,
+            graph_points=SELECTED_PLANE_GRAPH_POINTS,
+            snapshot_regression_mm=EXPORT_REGRESSED_SNAPSHOT_MM,
+            snapshot_path=f"{OUTPUT_FOLDER}/{REGRESSED_SNAPSHOT_FILENAME}",
+            show_plane_preview=SHOW_PLANE_PREVIEW,
+            open_interactive_viewer=OPEN_INTERACTIVE_VIEWER,
+        )
 
 
 
@@ -653,7 +714,7 @@ try:
         #OxtankMath.heattransferoxtank(oxtankID,oxtanksurfaceareainput,oxtankmass,oxtankspecheat,Timestep)
         OxtankMath.Calc_CD(chamberpressure_PA=FuelGrainMath.chamberpressure_PA)
         if Is_FuelGrain_PixelMethod==True:
-            FuelGrainMath.pixelmethodgeo(Is_fuelGrain_Helix=Is_fuelGrain_Helix,FuelGrainLength=FuelGrainLength,Fuel_Density=Fuel_Density,Timestep=Timestep,amountofsmallcircles=AmountofSmallCircles)
+            FuelGrainMath.pixelmethodgeo(Is_fuelGrain_Helix=Is_fuelGrain_Helix,FuelGrainLength=FuelGrainLength,Fuel_Density=Fuel_Density,Timestep=Timestep,amountofsmallcircles=AmountofSmallCircles,Override_effectivelengthconstant=Override_effectivelengthconstant,effectivelengthconstant=effectivelengthconstant )
         FuelGrainMath.oxflux_func(OxtankMath.RealMassFlowRate,RealTime)
         FuelGrainMath.regression_func(OxtankMath.status,Regression_Aco,Regression_Nco,regfluxstuff,Timestep)
         

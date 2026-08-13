@@ -1,0 +1,10 @@
+metric,display_unit,branch,burnthrough_regression,degree,r_squared,equation,coefficient_r_power_2,coefficient_r_power_1,coefficient_r_power_0,coefficient_r_power_4,coefficient_r_power_3
+port_area_mm2,Port area (mm²),all regression,not reached,2,0.999996776500911,y = 3.0086r^2 + 319.176r + 5563.38,3.00860018498252,319.17559764815417,5563.378776816356,,
+port_perimeter_mm,Port perimeter (mm),all regression,not reached,2,0.9993574726193265,y = 0.00970165r^2 + 7.21161r + 398.816,0.009701654685249021,7.211606887949313,398.8161104999093,,
+hydraulic_diameter_mm,Hydraulic diameter (mm),all regression,not reached,2,0.999589460297478,y = - 0.00524903r^2 + 2.10066r + 56.1769,-0.0052490266867251615,2.1006583458792187,56.17688783607752,,
+max_inscribed_diameter_mm,Max inscribed diameter (mm),all regression,not reached,2,0.9999025181621175,y = 0.00379614r^2 + 1.91134r + 74.8555,0.0037961411251761783,1.9113360737037821,74.85548891441286,,
+min_enclosing_diameter_mm,Min enclosing diameter (mm),all regression,not reached,2,0.9999927386492569,y = - 5.6324e-05r^2 + 2.00366r + 98.6681,-5.6323968102740865e-05,2.0036646601906596,98.66810455081308,,
+circle_boundary_overlap_mm,Circle boundary contact (mm),all regression,not reached,4,0.992297351844714,y = - 5.16728e-05r^4 + 0.00581764r^3 - 0.150563r^2 - 2.43422r + 109.04,-0.150563107622301,-2.4342188467155474,109.04002883427117,-5.167276739314901e-05,0.005817642254052451
+largest_arm_contact_mm,Largest contact arc (mm),all regression,not reached,3,0.9914153201924183,y = 0.000127262r^3 + 0.00346028r^2 - 0.872364r + 23.3839,0.0034602774713290065,-0.87236357934097,23.383853271672663,,0.00012726186344597543
+port_volume_mm3,Whole-grain port volume (mm³),all regression,not reached,2,0.999996812567414,y = 2403.34r^2 + 255484r + 4.44943e+06,2403.3390566218545,255483.52412692836,4449425.453508028,,
+burning_surface_area_mm2,Whole-grain burning surface (mm²),all regression,not reached,2,0.9995140507351719,y = 6.30862r^2 + 5817.68r + 318951,6.308620022343195,5817.684097585152,318951.2088147373,,
