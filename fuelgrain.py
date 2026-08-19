@@ -19,6 +19,15 @@ import trimesh
 from scipy import ndimage
 import attempyforfgreg as regression_3d
 
+# =============================================================================
+# REGRESSION IMPLEMENTATIONS IN THIS FILE
+#
+# 1. LEGACY 2-D PIXEL METHOD: methods named ``*_legacy`` retain the old
+#    fuel_grain_regression2 workflow for reference only.
+# 2. ACTIVE 3-D METHOD: methods named ``*_3d`` use attempyforfgreg.py and are
+#    what motormodel_copy2.py uses to generate its pixel-method coefficients.
+# =============================================================================
+
 
 
 
@@ -53,6 +62,8 @@ class FuelGrain():
         self.chamberpressure_PA=start_chamber_pressure_pa
         self.chamberpressure_PSI=self.chamberpressure_PA/6894.76
         self.cstar=None
+        self.chamber_temp=None
+        self.MW_chamber=None
         self.throatpressure_PA=None
         self.throatpressure_PSI=None
         self.injectorregression_help=HowmuchInj_Help
@@ -89,8 +100,18 @@ class FuelGrain():
             self.p_RC=None
             self.p_correctionfactor=None
             self.ratio_forCF=None
-            
+            self.Blowingp2=None
+            self.helix_fc=None
+            self.hydrolicdiamter=self.diameter_grain
+            self.blowing_helix=None
+            self.blowing_normal=None
+            self.newblowingratio=None
+            self.helix_wallshear=None
             self.ratiofor_pRC=None
+            self.ratio2=None
+            self.cf_for_blowing=None
+
+
         if Is_fuelgrain_Transient==True: 
             self.newchamberpressure_PA=start_chamber_pressure_pa
             self.newcstar= None
@@ -105,6 +126,11 @@ class FuelGrain():
                 self.massGas=StartMass_Gas
             self.deltaPressure_PA=None
             self.newchamberpressure_psi=None
+            self.deltaPressure_PA=None
+            self.SpecR=None
+            self.throatcrit_ratio=None
+            self.realthroatratio=None
+            self.Chocked_status=False
 
             
             
@@ -146,6 +172,7 @@ class FuelGrain():
             self.mdotdiff=0
             self.circumdiff=0
             self.areadiff=0
+            self.newblowingratio=None
             self.hydrolicdiamter=self.diameter_grain
             
         
@@ -196,7 +223,7 @@ class FuelGrain():
         self._init_attrs = list(self.__dict__.keys())
         self.outputcsv = pd.DataFrame(columns=self._init_attrs)
         self._output_rows = []
-    def stuffnoprint (self,Is_fuelGrain_PixelMethod,outerdiameter_inches,totalComplexArea,Is_fuelGrain_Helix,revPitch,PitchFor_Helix):
+    def stuffnoprint (self,Is_fuelGrain_PixelMethod,outerdiameter_inches,totalComplexArea,Is_fuelGrain_Helix,revPitch,PitchFor_Helix,Usepixel_calcs_SAV):
         self.dontcare=0
         self.gamma_chamber=None
         self.gamma_throat=None
@@ -204,6 +231,7 @@ class FuelGrain():
         self.enthapy_vaporpyrolsis_fuel=51.88 #kj/kg
         self.Is_pixel=Is_fuelGrain_PixelMethod
         self.Is_helix=Is_fuelGrain_Helix
+        self.Usepixel_calcs_SAV=Usepixel_calcs_SAV
         self.OuterDiameter_inches=outerdiameter_inches
         self.Areabasedon_OuterDiameter_mm=( ( (outerdiameter_inches*25.4)/2 )**2 )*3.14
         
@@ -256,6 +284,10 @@ class FuelGrain():
             if Is_start_mass_gas_input==True:
                 self.massGas=StartMass_Gas
             self.deltaPressure_PA=None
+            self.SpecR=None
+            self.throatcrit_ratio=None
+            self.realthroatratio=None
+            self.Chocked_status=False
 
             
             
@@ -370,6 +402,11 @@ class FuelGrain():
         print(f"Initial inner surface area stored: {self.initial_surface_area:.6f} m²")
         return self.initial_surface_area
 
+    # =========================================================================
+    # PIXEL-METHOD RUNTIME GEOMETRY
+    # Uses coefficients loaded by run_regression_analysis(), which currently
+    # delegates to the active 3-D attempyforfgreg implementation below.
+    # =========================================================================
     def pixelmethodgeo(self,Is_fuelGrain_Helix,FuelGrainLength,Fuel_Density,Timestep,amountofsmallcircles,effectivelengthconstant,Override_effectivelengthconstant):
         """
         Calculate pixel method geometry using polynomial curve fits from regression analysis.
@@ -500,6 +537,10 @@ class FuelGrain():
        # if Is_fuelGrain_Helix==True:
            # self.insurfacearea = self.insurfacearea + self.surfaceareaadd
 
+    # =========================================================================
+    # LEGACY 2-D PIXEL REGRESSION (fuel_grain_regression2.py)
+    # Retained for comparison only. It is not called by the motor model.
+    # =========================================================================
     def _run_regression_analysis_legacy(self, obj_file_path, regression_rate=3.0, time_seconds=30, cross_section_axis=2, show_plots=True, plot_length_unit=None, plot_area_unit=None):
         """
         Run full fuel grain regression analysis with all graphs and curve fits.
@@ -611,7 +652,11 @@ class FuelGrain():
             if _plt_was_interactive:
                 plt.ion()
 
-    def run_regression_analysis(self, obj_file_path, regression_rate=3.0, time_seconds=30,
+    # =========================================================================
+    # ACTIVE 3-D PIXEL REGRESSION (attempyforfgreg.py)
+    # This is the source of area/perimeter/surface/contact fits for the motor.
+    # =========================================================================
+    def run_regression_analysis_3d(self, obj_file_path, regression_rate=3.0, time_seconds=30,
                                 cross_section_axis=2, show_plots=True, plot_length_unit=None,
                                 plot_area_unit=None, in_plane_resolution=500,
                                 length_resolution=200, unit_scale_mm=None,
@@ -696,6 +741,10 @@ class FuelGrain():
                 regression_3d.Path("regression_outputs") / "fuelgrain_3d_curve_fits.csv", show=True,
             )
 
+    def run_regression_analysis(self, *args, **kwargs):
+        """Compatibility entry point: run the active 3-D regression workflow."""
+        return self.run_regression_analysis_3d(*args, **kwargs)
+
     def masses_of_stuff(self, Fuel_Density, OxtankMath,Timestep, FuelGrainLength):
         
         #self.mdotfuel=self.insurfacearea2*self.regression_M_persec*Fuel_Density#*self.flowrateRatio_Use
@@ -715,6 +764,8 @@ class FuelGrain():
         self.OF= RealMassFlowRate/self.mdotfuel
     def cstar_func(self,CEAforRocket):
         self.cstar=CEAforRocket.get_Cstar(Pc=self.chamberpressure_PSI, MR=self.OF) * 0.3048 #m/sec
+        self.chamber_temp=(CEAforRocket.get_Temperatures(Pc=self.chamberpressure_PSI, MR=self.OF, eps=1, frozen=0)[0])*0.555556
+       
     def chamberpressure_func(self,NozzleMath,NozzleCD_ForChamberPressure,Ncomb_ForChamberPressure,throatarea_fromNozzle,Is_fuelgrain_Transient):
         self.chamberpressure_PA=(self.totalmdot*self.cstar*Ncomb_ForChamberPressure)/(throatarea_fromNozzle*NozzleCD_ForChamberPressure)
         if Is_fuelgrain_Transient==True:
@@ -733,9 +784,31 @@ class FuelGrain():
     
     def densitys(self,CEAforRocket):
         self.chamberDensity= CEAforRocket.get_Chamber_Density(Pc=self.chamberpressure_PSI, MR=self.OF)*16.01846 #convert from lb/ft^3 to kg/m^3
-        
 
-    def helixmath(self,CEAforRocket,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix,revPitch,PitchFor_Helix,AmountofSmallCircles,Is_FuelGrain_PixelMethod,FuelGrainDiameter,expansionratio,OusideSmallCircle_raduis,helical_archsegment,thoart_area,):
+    @staticmethod
+    def calculate_fc(epsilon, r0, radius):
+        """Return F_c from the Reynolds-free implicit friction relation."""
+        if min(epsilon, r0, radius) <= 0:
+            raise ValueError("epsilon, r0, and radius must be positive")
+
+        radius_ratio_sqrt = np.sqrt(r0 / radius)
+
+        def residual(fc):
+            log_argument = 0.104 * epsilon / fc * radius_ratio_sqrt
+            return 1 / np.sqrt(fc) + 0.923 * np.log(log_argument)
+
+        candidates = np.logspace(-12, 0, 400)
+        for lower, upper in zip(candidates[:-1], candidates[1:]):
+            lower_residual = residual(lower)
+            upper_residual = residual(upper)
+            if lower_residual == 0:
+                return lower
+            if lower_residual * upper_residual < 0:
+                return scp.optimize.brentq(residual, lower, upper)
+
+        raise ValueError("The Reynolds-free F_c equation has no positive solution between 1e-12 and 1")
+
+    def helixmath(self,CEAforRocket,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix,revPitch,PitchFor_Helix,AmountofSmallCircles,Is_FuelGrain_PixelMethod,FuelGrainDiameter,expansionratio,OusideSmallCircle_raduis,helical_archsegment,thoart_area,fuelgrainlength,mw_ox,Fuel_Density,oxden,sandgrainroughness):
         self.fac_CR=(self.hydrolicdiamter*self.hydrolicdiamter*3.14/4)/thoart_area
         self.chambermach=CEAforRocket.get_Chamber_MachNumber(Pc=self.chamberpressure_PSI, MR=self.OF, fac_CR=self.fac_CR)
         # Try to get chamber sonic velocity via available API; fall back to a reasonable default
@@ -767,9 +840,9 @@ class FuelGrain():
                 self.startinglength_inbetween_segment=helical_archsegment*(self.P_largest_arm_contact/(self.P_max_inscribed_diameter*3.14/AmountofSmallCircles))
            
             self.startinglength_inbetween_segment-=self.regression_M_persec_withratio*Timestep*2
-            self.lengthinbetween_2=(self.P_largest_arm_contact/(self.P_max_inscribed_diameter*3.14/AmountofSmallCircles))*helical_archsegment
+           # self.lengthinbetween_2=(self.P_largest_arm_contact/(self.P_max_inscribed_diameter*3.14/AmountofSmallCircles))*helical_archsegment
             
-            self.triangehelicallength=np.sqrt((self.lengthinbetween_2)**2+( (self.P_min_enclosing_diameter-self.P_max_inscribed_diameter) *0.5)**2)
+            #self.triangehelicallength=np.sqrt((self.lengthinbetween_2)**2+( (self.P_min_enclosing_diameter-self.P_max_inscribed_diameter) *0.5)**2)
             self.ratio_forCF=(self.P_perimeter-AmountofSmallCircles*self.P_largest_arm_contact)/self.P_perimeter
             if self.time==Timestep:
                 self.starttrianglevalue=self.triangehelicallength
@@ -780,9 +853,10 @@ class FuelGrain():
         else:
             self.helixloopdiameter=+ self.regression_M_persec_withratio*Timestep*2
             self.helixNominalDiameter=+ self.regression_M_persec_withratio*Timestep*2 # work this out later
-        
+        if self.Is_pixel==True:
+                    self.helixloopdiameter=self.p_helixloopdiameter
         self.helixlength_meters=revPitch*np.sqrt(((self.helixloopdiameter*3.14)**2)+(PitchFor_Helix)**2)
-        self.HelixP_meters=(self.helixlength_meters/revPitch)
+        self.HelixP_meters=(fuelgrainlength/revPitch)
         
 
 
@@ -793,7 +867,7 @@ class FuelGrain():
         if self.Is_pixel==True:
             self.p_RC=(self.p_helixloopdiameter/2)*(1+(self.HelixP_meters/(3.14*self.p_helixloopdiameter))**2)
             #self.ratiofor_pRC=np.sqrt(1+((self.p_RC/(self.triangehelicallength*6.28))**2))
-            self.ratiofor_pRC=np.sqrt(1+3.14*((self.starttrianglevalue-self.triangehelicallength)/self.starttrianglevalue)**2)
+           # self.ratiofor_pRC=np.sqrt(1+3.14*((self.starttrianglevalue-self.triangehelicallength)/self.starttrianglevalue)**2)
             self.p_correctionfactor=(np.sqrt(1+6.28*(self.totalrgession/2*AmountofSmallCircles/self.p_RC)**2))
             #self.p_correctionfactor=(np.sqrt(1+(self.triangehelicallength*6.28/(self.p_RC))**2)) #fake
             self.p_correctionRC=self.p_correctionfactor*self.p_RC
@@ -807,15 +881,46 @@ class FuelGrain():
             #self.chamber_enthalpy=OxtankMath.downstream_enthalpy
         self.BlowingRatio=1+((self.p_helixloopdiameter/self.p_helixNomminaldiameter)/(self.chamber_enthalpy/self.enthapy_vaporpyrolsis_fuel))
 
+        # Reynolds-free F_c calculation for the helix.
+        # The first port radius is retained as r0; the hydraulic radius is R.
+        port_radius = self.hydrolicdiamter / 2
+        if not hasattr(self, "_helix_fc_reference_radius"):
+            self._helix_fc_reference_radius = port_radius
+        relative_roughness = sandgrainroughness / port_radius
+        
+        self.helix_fc = self.calculate_fc(
+                epsilon=relative_roughness,
+                r0=self._helix_fc_reference_radius,
+                radius=self.CorrectionRC,
+            )
+      
+        
+               
+        # Match TRY.PY: f_D = F_c for wall shear, while c_f for the normal
+        # blowing equation is a separately supplied coefficient.
+        self.cf_for_blowing = self.cfstraight
+        surface_mass_flux = self.mdotfuel / self.insurfacearea
+        self.helix_wallshear = self.helix_fc * (
+            self.chamberDensity * self.streamvelocity ** 2
+        ) / 8
+        self.blowing_helix = (
+            surface_mass_flux * self.streamvelocity / self.helix_wallshear
+        )
+        self.blowing_normal = surface_mass_flux / (
+            self.chamberDensity * self.streamvelocity * self.cf_for_blowing / 2
+        )
+        self.newblowingratio=(self.blowing_normal/self.blowing_helix)**0.77
+        self.ratio2=(self.helix_fc*0.25/self.cfstraight)**0.77
         self.CFhelix=self.cfstraight+0.0075*(np.sqrt(self.p_helixNomminaldiameter/(2*self.p_correctionRC)))
         if self.Is_pixel==True:
             self.p_NEWarclengthesitmate="WHOKNOWS"
+
         #if self.Newarclengthesitmate>0:
             #self.CFratio=(self.CFhelix*self.BlowingRatio/self.cfstraight)**((self.Newarclengthesitmate/self.onearchlengthestimate)**(1/5)) #figure out better way to do this
         #else:
             #self.CFratio=1
         #self.CFratio=((self.CFhelix*self.BlowingRatio/self.cfstraight)-1)*self.ratiofor_pRC+1
-        self.CFratio=(((self.CFhelix*self.BlowingRatio/self.cfstraight)-1)*self.ratio_forCF/self.ratiofor_pRC)+1
+        self.CFratio=(((self.CFhelix*self.newblowingratio/self.cfstraight)-1)*self.ratio_forCF*self.ratio_forCF)+1
         if Is_fuelGrain_Helix==False:
             self.CFratio=1
     def Whole_thing_helix(self,CEAforRocket,expansionratio,thoart_area,Is_FuelGrain_GoshaStar,timestep,revPitch,PitchFor_Helix):
@@ -928,8 +1033,16 @@ class FuelGrain():
             self.surfaceareaadd=0
 
 
-    def transeint_chamber_model(self,NozzleCD_ForChamberPressure,Ncomb_ForChamberPressure,NozzleMath,Fuel_Density,Timestep,Is_fuelgrain_Transient):
+    def transeint_chamber_model(self,NozzleCD_ForChamberPressure,Ncomb_ForChamberPressure,NozzleMath,Fuel_Density,Timestep,Is_fuelgrain_Transient,ambientpressure_pa):
         if Is_fuelgrain_Transient==True:
+            
+            self.SpecR=8314/self.MW_chamber
+            self.throatcrit_ratio=(2/(self.gamma_throat+1))**((self.gamma_throat+1)/(2*(self.gamma_throat-1)))
+            self.realthroatratio=ambientpressure_pa/self.newchamberpressure_PA
+            if self.realthroatratio>self.throatcrit_ratio:
+                self.Chocked_status=False
+            else:
+                self.Chocked_status=True
             self.newcstar= self.cstar*Ncomb_ForChamberPressure
             self.mdotgen=self.totalmdot
             self.mdotnozzle= NozzleCD_ForChamberPressure* self.newchamberpressure_PA*NozzleMath.throatarea/ self.newcstar
@@ -1006,6 +1119,9 @@ class FuelGrain():
     
 
 
+    # =========================================================================
+    # LEGACY 2-D GEOMETRY LOADER (fuel_grain_regression2.py)
+    # =========================================================================
     def _load_obj_file_geometry_legacy(self, obj_file_path, outer_diameter_inches=5.0, resolution=500, cross_section_axis=2, cross_section_pos=None):
         """
         Load an OBJ file and extract starting area, inner port area, and perimeter.
@@ -1091,6 +1207,9 @@ class FuelGrain():
         
         return results
 
+    # =========================================================================
+    # ACTIVE 3-D GEOMETRY LOADER (attempyforfgreg.py)
+    # =========================================================================
     def load_obj_file_geometry(self, obj_file_path, outer_diameter_inches=5.0, resolution=500,
                                cross_section_axis=2, cross_section_pos=None):
         """Return initial selected-plane geometry from the 3-D regression rasterizer."""

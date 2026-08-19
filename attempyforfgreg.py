@@ -27,6 +27,7 @@ import time
 import numpy as np
 import trimesh
 from scipy import ndimage
+from scipy.spatial import ConvexHull, QhullError
 from skimage.draw import polygon
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
@@ -53,7 +54,7 @@ LENGTH_RESOLUTION = 200                 # Number of slices along the selected pl
 RESOLUTION = IN_PLANE_RESOLUTION
 REGRESSION_RATE_MM_PER_S = 1.0         # Normal fuel regression rate
 SIMULATION_TIME_S = 50.0               # Total simulated burn time
-SLIDER_STEPS = 11                       # Number of regression/time positions in the slider
+SLIDER_STEPS = 21                       # Number of regression/time positions in the slider
 DISPLAY_LENGTH_UNIT = "mm"             # "mm", "cm", "m", or "in" for plots and viewer labels
 OPEN_INTERACTIVE_VIEWER = True          # Open the X/Y/Z interactive viewer after calculating
 SMOOTH_VIEWER_RENDERING = False         # Smooth the displayed slice edges; does not alter calculations
@@ -68,8 +69,14 @@ SHOW_CURVE_FIT_EQUATIONS_ON_PLOTS = False  # Show piecewise equations in each gr
 SELECTED_PLANE_GRAPH_POINTS = 50     # Number of regression samples used for the selected-plane curves
 STOP_SELECTED_PLANE_GRAPHS_WHEN_FUEL_IS_GONE = True  # Stop graph/fit at the first empty selected-plane slice
 OUTPUT_FOLDER = "regression_outputs"  # Folder for generated CSV and PNG files
-EXPORT_REGRESSED_SNAPSHOT_MM = None  # Set (for example) 25.0 to export remaining fuel as an OBJ
+EXPORT_REGRESSED_SNAPSHOT_MM = 50  # Set (for example) 25.0 to export remaining fuel as an OBJ
 REGRESSED_SNAPSHOT_FILENAME = "regressed_fuel_snapshot.obj"
+# Helical-sweep design inputs. OBJ files do not reliably preserve parametric
+# CAD features, so enter pitch and centerline radius from the source drawing.
+IS_HELICAL_SWEEP = False              # Set True only after entering verified helix CAD dimensions
+HELIX_PITCH_MM = None                  # P: axial advance per full revolution
+HELIX_CENTERLINE_RADIUS_MM = None      # r: radius from helix axis to swept-profile centerline
+SHOW_HELIX_DIMENSIONS_IN_VIEWER = False # Enable the slider-viewer pitch/curvature toggle
 # =============================================================================
 
 DISPLAY_UNIT_TO_MM = {"mm": 1.0, "cm": 10.0, "m": 1000.0, "in": 25.4}
@@ -346,7 +353,9 @@ def export_regressed_fuel_snapshot(solid: np.ndarray, initial_port: np.ndarray, 
     distance_to_port = ndimage.distance_transform_edt(~initial_port, sampling=pitch)
     remaining = solid & ~(solid & (distance_to_port <= regression_mm))
     if not np.any(remaining):
-        raise ValueError("Snapshot regression leaves no fuel to export")
+        print(f"Warning: snapshot at {regression_mm:.3f} mm was skipped because no fuel remains. "
+              "Choose a smaller EXPORT_REGRESSED_SNAPSHOT_MM value to export a model.")
+        return
     # Marching cubes turns the anisotropic voxel model into a triangle mesh.
     snapshot = trimesh.voxel.ops.matrix_to_marching_cubes(remaining, pitch=pitch)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -358,6 +367,72 @@ def centre_slice_metrics(port: np.ndarray, solid: np.ndarray, axis: int,
                          pitch: np.ndarray) -> tuple[float, float]:
     """Port area and wetted perimeter at the centre axial slice."""
     return slice_metrics(port, solid, axis, port.shape[axis] // 2, pitch)
+
+
+def port_bounding_circles(port_2d: np.ndarray, plane_pitch: np.ndarray) -> tuple[tuple[float, float, float] | None, tuple[float, float, float] | None]:
+    """Return largest-inscribed and smallest-enclosing circles for a port slice.
+
+    Coordinates and radii are in mm, with coordinates measured from the lower
+    left of the displayed voxel slice.  The enclosing circle uses the convex
+    hull of port pixels, which is sufficient because a circle is convex.
+    """
+    if not np.any(port_2d):
+        return None, None
+    distance = ndimage.distance_transform_edt(port_2d, sampling=plane_pitch)
+    inscribed_index = np.unravel_index(np.argmax(distance), distance.shape)
+    inscribed = (
+        (inscribed_index[0] + 0.5) * plane_pitch[0],
+        (inscribed_index[1] + 0.5) * plane_pitch[1],
+        # EDT is measured centre-to-centre; move to the nearest voxel edge so
+        # the green circle stays inside the orange port pixels on screen.
+        max(0.0, float(distance[inscribed_index] - 0.5 * np.min(plane_pitch))),
+    )
+
+    # Pixel centres are enough for this display measurement and avoid turning
+    # every filled pixel edge into a separate geometry primitive.
+    points = (np.argwhere(port_2d).astype(float) + 0.5) * plane_pitch
+    if len(points) == 1:
+        return inscribed, (float(points[0, 0]), float(points[0, 1]), 0.5 * float(np.linalg.norm(plane_pitch)))
+    try:
+        points = points[ConvexHull(points).vertices]
+    except QhullError:
+        # A degenerate (one-pixel-wide) port is enclosed by its two extremes.
+        first, last = points[0], points[-1]
+        center = (first + last) / 2.0
+        return inscribed, (float(center[0]), float(center[1]),
+                           float(np.linalg.norm(last - first) / 2.0 + 0.5 * np.linalg.norm(plane_pitch)))
+
+    # Deterministic randomized incremental minimum-enclosing-circle algorithm.
+    points = points[np.random.default_rng(0).permutation(len(points))]
+    center = points[0].copy()
+    radius = 0.0
+    tolerance = 1e-9
+    for i, point in enumerate(points):
+        if np.linalg.norm(point - center) <= radius + tolerance:
+            continue
+        center, radius = point.copy(), 0.0
+        for j in range(i):
+            other = points[j]
+            if np.linalg.norm(other - center) <= radius + tolerance:
+                continue
+            center = (point + other) / 2.0
+            radius = float(np.linalg.norm(other - point) / 2.0)
+            for k in range(j):
+                third = points[k]
+                if np.linalg.norm(third - center) <= radius + tolerance:
+                    continue
+                matrix = 2.0 * np.array([other - point, third - point])
+                rhs = np.array([np.dot(other, other) - np.dot(point, point),
+                                np.dot(third, third) - np.dot(point, point)])
+                try:
+                    center = np.linalg.solve(matrix, rhs)
+                except np.linalg.LinAlgError:
+                    continue
+                radius = float(np.linalg.norm(point - center))
+    # Expand from pixel centres to their outer corners so the purple circle
+    # actually encloses every displayed port voxel.
+    enclosing = (float(center[0]), float(center[1]), radius + 0.5 * float(np.linalg.norm(plane_pitch)))
+    return inscribed, enclosing
 
 
 def regression_table(solid: np.ndarray, initial_port: np.ndarray, pitch: np.ndarray, axis: int,
@@ -482,6 +557,7 @@ def picked_plane_regression(solid: np.ndarray, initial_port: np.ndarray, pitch: 
             "remaining_fuel_area_mm2": float(np.count_nonzero(np.take(remaining, slice_index, axis=axis)) *
                                               np.prod(pitch[plane_axes])),
             "port_volume_mm3": float(np.count_nonzero(port) * np.prod(pitch)),
+            "burned_fuel_volume_mm3": float(np.count_nonzero(burned) * np.prod(pitch)),
             "burning_surface_area_mm2": burning_surface_area(port, remaining, pitch, axis),
             "burnthrough": burnthrough,
         })
@@ -559,17 +635,19 @@ def save_picked_plane_analysis(rows: list[dict[str, float]], axis: int, path: Pa
         ("circle_boundary_overlap_mm", f"Circle boundary contact ({display_unit})", display_scale),
         ("largest_arm_contact_mm", f"Largest contact arc ({display_unit})", display_scale),
         ("port_volume_mm3", f"Whole-grain port volume ({display_unit}³)", display_scale ** 3),
+        ("burned_fuel_volume_mm3", f"Burned fuel volume ({display_unit}³)", display_scale ** 3),
         ("burning_surface_area_mm2", f"Whole-grain burning surface ({display_unit}²)", display_scale ** 2),
     ]
-    core_figure, core_plots = plt.subplots(3, 2, figsize=(13, 13), constrained_layout=True)
+    core_figure, core_plots = plt.subplots(4, 2, figsize=(13, 17), constrained_layout=True)
     contact_figure, contact_plots = plt.subplots(2, 2, figsize=(13, 9), constrained_layout=True)
     # Keep chart order while placing core geometry in the first window and
     # contact-only measurements in the second.
     plots = np.asarray([
         core_plots.flat[0], core_plots.flat[1], core_plots.flat[2], core_plots.flat[3],
         contact_plots.flat[0], contact_plots.flat[1], contact_plots.flat[2],
-        core_plots.flat[4], core_plots.flat[5],
+        core_plots.flat[4], core_plots.flat[5], core_plots.flat[6],
     ])
+    core_plots.flat[7].set_visible(False)
     contact_plots.flat[3].set_visible(False)
     fit_rows: list[dict[str, float | str]] = []
     indices = np.flatnonzero(np.asarray([row["burnthrough"] for row in rows], dtype=bool))
@@ -637,16 +715,35 @@ def save_picked_plane_analysis(rows: list[dict[str, float]], axis: int, path: Pa
     contact_figure.suptitle(
         f"Selected {('X', 'Y', 'Z')[axis]} plane: circle/contact fits ({status})"
     )
+    helix_figure = None
+    helix_path = None
+    if "pitch_mm" in rows[0] and "radius_of_curvature_mm" in rows[0]:
+        helix_figure, helix_plots = plt.subplots(1, 2, figsize=(12, 4.5), constrained_layout=True)
+        helix_metrics = (("pitch_mm", "Helix pitch P"), ("radius_of_curvature_mm", "Helix curvature radius R_c"))
+        for plot, (key, label) in zip(helix_plots, helix_metrics):
+            values = np.asarray([row[key] for row in rows]) / display_scale
+            plot.plot(x, values, "o-", color="#7e22ce", markersize=3)
+            plot.set_xlabel(f"Regression distance ({display_unit})")
+            plot.set_ylabel(f"{label} ({display_unit})")
+            plot.grid(True, alpha=0.3)
+            plot.text(0.02, 0.95, "Constant in the current uniform-regression model",
+                      transform=plot.transAxes, va="top", fontsize=8)
+        helix_figure.suptitle("Helix geometry versus regression")
     if path is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
         core_figure.savefig(path, dpi=180, bbox_inches="tight")
         contact_path = path.with_name(f"{path.stem}_contact_metrics{path.suffix}")
         contact_figure.savefig(contact_path, dpi=180, bbox_inches="tight")
+        if helix_figure is not None:
+            helix_path = path.with_name(f"{path.stem}_helix_geometry{path.suffix}")
+            helix_figure.savefig(helix_path, dpi=180, bbox_inches="tight")
     write_csv([row for row in fit_rows if "branch" in row], curve_fits_path)
     print(f"Selected-plane data written to: {csv_path}")
     if path is not None:
         print(f"Selected-plane plots written to: {path}")
         print(f"Selected-plane contact plots written to: {contact_path}")
+        if helix_path is not None:
+            print(f"Helix-geometry plot written to: {helix_path}")
     print(f"Selected-plane curve-fit equations written to: {curve_fits_path}")
     print(f"Selected-plane {status}")
     if STOP_SELECTED_PLANE_GRAPHS_WHEN_FUEL_IS_GONE:
@@ -659,6 +756,8 @@ def save_picked_plane_analysis(rows: list[dict[str, float]], axis: int, path: Pa
         plt.show()
     plt.close(core_figure)
     plt.close(contact_figure)
+    if helix_figure is not None:
+        plt.close(helix_figure)
 
 
 def save_visualization(solid: np.ndarray, initial_port: np.ndarray, pitch: float, axis: int,
@@ -719,7 +818,8 @@ def save_visualization(solid: np.ndarray, initial_port: np.ndarray, pitch: float
 def show_interactive_viewer(solid: np.ndarray, initial_port: np.ndarray, pitch: float,
                             distances: np.ndarray, rows: list[dict[str, float]],
                             initial_axis: int, regression_rate: float,
-                            display_unit: str, display_scale: float) -> None:
+                            display_unit: str, display_scale: float,
+                            helix_dimensions: dict[str, float] | None = None) -> None:
     """Open a slider-controlled cross-section viewer for the regression model."""
     distance_to_port = ndimage.distance_transform_edt(~initial_port, sampling=pitch)
     states: list[tuple[np.ndarray, np.ndarray]] = []
@@ -748,6 +848,12 @@ def show_interactive_viewer(solid: np.ndarray, initial_port: np.ndarray, pitch: 
     radio_buttons = RadioButtons(radio_axis, axis_names, active=initial_axis)
     overlay_axis = figure.add_axes((0.65, 0.205, 0.25, 0.07))
     original_overlay = CheckButtons(overlay_axis, ["Show 0-regression outline"], [True])
+    circle_overlay = CheckButtons(figure.add_axes((0.65, 0.285, 0.25, 0.07)),
+                                  ["Show inscribed / enclosing circles"], [False])
+    helix_overlay = None
+    if helix_dimensions is not None and SHOW_HELIX_DIMENSIONS_IN_VIEWER:
+        helix_overlay = CheckButtons(figure.add_axes((0.65, 0.365, 0.25, 0.07)),
+                                     ["Show helix dimensions"], [True])
     state_box_axis = figure.add_axes((0.65, 0.125, 0.11, 0.04))
     state_box = TextBox(state_box_axis, "State", initial="0")
     slice_box_axis = figure.add_axes((0.65, 0.065, 0.11, 0.04))
@@ -756,6 +862,8 @@ def show_interactive_viewer(solid: np.ndarray, initial_port: np.ndarray, pitch: 
     selected_axis = [initial_axis]
     changing_axis = [False]
     show_original_outline = [True]
+    show_bounding_circles = [False]
+    show_helix_dimensions = [helix_overlay is not None]
 
     def redraw(_value=None) -> None:
         state_index = int(regression_slider.val)
@@ -787,6 +895,46 @@ def show_interactive_viewer(solid: np.ndarray, initial_port: np.ndarray, pitch: 
                                linewidths=1.5,
                                extent=(0, section.shape[0] * pitch[remaining_axes[0]] / display_scale,
                                        0, section.shape[1] * pitch[remaining_axes[1]] / display_scale))
+        inscribed_circle = enclosing_circle = None
+        if show_bounding_circles[0]:
+            inscribed_circle, enclosing_circle = port_bounding_circles(
+                np.take(port, slice_index, axis=selected_plane), pitch[remaining_axes]
+            )
+            for circle, color in ((inscribed_circle, "#22c55e"), (enclosing_circle, "#a855f7")):
+                if circle is not None:
+                    center_x, center_y, radius = circle
+                    image_axis.add_patch(plt.Circle(
+                        (center_x / display_scale, center_y / display_scale), radius / display_scale,
+                        fill=False, color=color, linewidth=2.0, linestyle="--",
+                    ))
+        if show_helix_dimensions[0] and helix_dimensions is not None:
+            width = section.shape[0] * pitch[remaining_axes[0]] / display_scale
+            height = section.shape[1] * pitch[remaining_axes[1]] / display_scale
+            pitch_length = helix_dimensions["pitch_mm"] / display_scale
+            curvature_radius = helix_dimensions["radius_of_curvature_mm"] / display_scale
+            # A transverse view cannot show pitch; it reports the calculated
+            # helix radius of curvature instead.
+            if selected_plane == initial_axis:
+                image_axis.text(width * 0.5, height * 0.08,
+                                f"Helix curvature radius R_c = {curvature_radius:.2f} {display_unit}",
+                                color="#7e22ce", ha="center", fontsize=9,
+                                bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.8})
+            # A longitudinal view supports pitch P along the motor-axis direction.
+            elif initial_axis in remaining_axes:
+                direction = remaining_axes.index(initial_axis)
+                span = width if direction == 0 else height
+                start, end = max(0.0, span * 0.5 - pitch_length / 2), min(span, span * 0.5 + pitch_length / 2)
+                level = height * 0.08 if direction == 0 else width * 0.08
+                if direction == 0:
+                    image_axis.annotate("", xy=(end, level), xytext=(start, level),
+                                        arrowprops={"arrowstyle": "<->", "color": "#dc2626", "linewidth": 1.5})
+                    image_axis.text((start + end) / 2, level + height * 0.035, f"P = {pitch_length:.2f} {display_unit}",
+                                    color="#b91c1c", ha="center", fontsize=9)
+                else:
+                    image_axis.annotate("", xy=(level, end), xytext=(level, start),
+                                        arrowprops={"arrowstyle": "<->", "color": "#dc2626", "linewidth": 1.5})
+                    image_axis.text(level + width * 0.035, (start + end) / 2, f"P = {pitch_length:.2f} {display_unit}",
+                                    color="#b91c1c", va="center", fontsize=9)
         remaining_names = [axis_names[number] for number in remaining_axes]
         image_axis.set_xlabel(f"{remaining_names[0]} direction ({display_unit})")
         image_axis.set_ylabel(f"{remaining_names[1]} direction ({display_unit})")
@@ -795,7 +943,15 @@ def show_interactive_viewer(solid: np.ndarray, initial_port: np.ndarray, pitch: 
                              f"regression = {distances[state_index] / display_scale:.3f} {display_unit}",
                              pad=10)
         row = rows[state_index]
+        circle_text = ""
+        if show_bounding_circles[0]:
+            inscribed_diameter = 2.0 * inscribed_circle[2] / display_scale if inscribed_circle else 0.0
+            enclosing_diameter = 2.0 * enclosing_circle[2] / display_scale if enclosing_circle else 0.0
+            circle_text = (f"\n\nLargest enclosed circle diameter: {inscribed_diameter:,.3f} {display_unit}\n"
+                           f"Smallest enclosing circle diameter: {enclosing_diameter:,.3f} {display_unit}\n"
+                           f"Diameter difference: {enclosing_diameter - inscribed_diameter:,.3f} {display_unit}")
         info.set_text(
+            circle_text +
             f"Selected {axis_names[selected_plane]} slice\n"
             f"Port area: {port_area / display_scale ** 2:,.2f} {display_unit}²\n"
             f"Port perimeter: {perimeter / display_scale:,.2f} {display_unit}\n\n"
@@ -830,6 +986,9 @@ def show_interactive_viewer(solid: np.ndarray, initial_port: np.ndarray, pitch: 
     slice_slider.on_changed(lambda value: None if changing_axis[0] else redraw(value))
     radio_buttons.on_clicked(change_axis)
     original_overlay.on_clicked(lambda _label: (show_original_outline.__setitem__(0, not show_original_outline[0]), redraw()))
+    circle_overlay.on_clicked(lambda _label: (show_bounding_circles.__setitem__(0, not show_bounding_circles[0]), redraw()))
+    if helix_overlay is not None:
+        helix_overlay.on_clicked(lambda _label: (show_helix_dimensions.__setitem__(0, not show_helix_dimensions[0]), redraw()))
     state_box.on_submit(lambda text: set_slider_from_text(text, regression_slider))
     slice_box.on_submit(lambda text: set_slider_from_text(text, slice_slider))
     redraw()
@@ -871,6 +1030,10 @@ def main() -> int:
     if (args.resolution < 20 or args.steps < 2 or SELECTED_PLANE_GRAPH_POINTS < 3 or max_regression_mm < 0 or
             (args.unit_scale_mm is not None and args.unit_scale_mm <= 0)):
         parser.error("resolution must be >=20, steps >=2, SELECTED_PLANE_GRAPH_POINTS >=3, and scales/distances non-negative")
+    if IS_HELICAL_SWEEP:
+        dimensions = (HELIX_CENTERLINE_RADIUS_MM, HELIX_PITCH_MM)
+        if any(value is None or value <= 0 for value in dimensions):
+            parser.error("Enter positive HELIX_CENTERLINE_RADIUS_MM and HELIX_PITCH_MM when IS_HELICAL_SWEEP is True")
 
     scale_to_mm = infer_unit_scale_to_mm(args.obj_file, args.unit_scale_mm)
     print("Loading OBJ mesh...")
@@ -912,11 +1075,30 @@ def main() -> int:
     print(f"Initial bore surface measured from OBJ triangles: {bore_area:.6f} mm^2")
     rows = regression_table(solid, port, pitch, axis, distances, mesh_volume, float(mesh.area),
                             initial_bore_area=bore_area)
+    helix_dimensions = None
+    if IS_HELICAL_SWEEP:
+        # For a helix r(theta) = (r cos theta, r sin theta, P theta / 2pi),
+        # its osculating radius is r * (1 + (P / (2 pi r))^2).
+        radius_of_curvature = HELIX_CENTERLINE_RADIUS_MM * (
+            1.0 + (HELIX_PITCH_MM / (2.0 * np.pi * HELIX_CENTERLINE_RADIUS_MM)) ** 2
+        )
+        helix_dimensions = {
+            "pitch_mm": HELIX_PITCH_MM,
+            "centerline_radius_mm": HELIX_CENTERLINE_RADIUS_MM,
+            "radius_of_curvature_mm": radius_of_curvature,
+        }
+        for row in rows:
+            row.update({"is_helical_sweep": True, **helix_dimensions})
+        print(f"Helical sweep: P={HELIX_PITCH_MM:.3f} mm; centerline r={HELIX_CENTERLINE_RADIUS_MM:.3f} mm; "
+              f"radius of curvature R_c={radius_of_curvature:.3f} mm")
     write_csv(rows, args.output)
     plane_rows: list[dict[str, float]] | None = None
     if SAVE_SELECTED_PLANE_ANALYSIS and not args.no_plane_analysis:
         graph_distances = np.linspace(0.0, max_regression_mm, SELECTED_PLANE_GRAPH_POINTS)
         plane_rows = picked_plane_regression(solid, port, pitch, axis, graph_distances)
+        if helix_dimensions is not None:
+            for row in plane_rows:
+                row.update({"is_helical_sweep": True, **helix_dimensions})
     save_visualization(solid, port, pitch, axis, distances, rows, args.plot,
                        REGRESSION_RATE_MM_PER_S, display_unit, display_scale, args.show)
 
@@ -929,7 +1111,7 @@ def main() -> int:
         print(f"Initial {name}: {value:.6g}")
     if OPEN_INTERACTIVE_VIEWER and not args.no_interactive:
         show_interactive_viewer(solid, port, pitch, distances, rows, axis,
-                                REGRESSION_RATE_MM_PER_S, display_unit, display_scale)
+                                REGRESSION_RATE_MM_PER_S, display_unit, display_scale, helix_dimensions)
     if plane_rows is not None:
         save_picked_plane_analysis(
             plane_rows, axis,

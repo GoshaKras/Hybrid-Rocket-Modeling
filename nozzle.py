@@ -34,6 +34,11 @@ class Nozzle():
         self.throatabltionrate=None
         self.exitabltionrate=None
         self.ISP=None
+        self.Is_flow_seperation=False
+        self.phase_separation_target_exitpressure_PA=None
+        self.real_exit_expansion_ratio=None
+        self.real_exit_area=None
+        self.real_exit_radius=None
         
 
 
@@ -69,13 +74,87 @@ class Nozzle():
         self.exitarea=self.exitraduis*self.exitraduis*3.14
 
     def expansionratio(self):
-        self.ExpansionRatio=self.exitarea/self.throatarea
+        if self.flow_sepration==True:
+            self.ExpansionRatio=self.real_exit_expansion_ratio
+        else:
+            self.ExpansionRatio=self.exitarea/self.throatarea
+        
 
 
     def Pressures(self,chamberpressure_PA):
         self.exitpressure_PA=chamberpressure_PA/self.pressure_exit_chamber_ratio
         self.exitpressure_PSI=self.exitpressure_PA/6894.76
+    def flow_sepration(self, chamber_pressure_pa, ambient_pressure_pa, expansion_ratio,
+                       chamberpressure_psi=None, of_ratio=None, CEAforRocket=None):
+        # Schmucker separation criterion:
+        # P_sep / P_a = (1.88 * M_sep - 1) ** 0.64.
+        # At the onset of separation the separation plane is the nozzle exit,
+        # so the installed exit Mach number defines the onset threshold.
+        schmucker_pressure_ratio = (1.88 * self.Exitmach - 1) ** 0.64
+        separation_pressure_pa = ambient_pressure_pa * schmucker_pressure_ratio
+        self.Is_flow_seperation = self.exitpressure_PA <= separation_pressure_pa
+        if self.Is_flow_seperation:
+            if any(value is None for value in (chamberpressure_psi, of_ratio, CEAforRocket)):
+                raise ValueError("Flow-separation area calculation requires chamber pressure, O/F, and CEA inputs")
+            self.calculate_phase_separation_exit_area(
+                chamberpressure_psi, of_ratio, CEAforRocket, ambient_pressure_pa
+            )
+            self.real_exit_expansion_ratio = self.real_exit_area / self.throatarea
+            self.ExpansionRatio = self.real_exit_expansion_ratio
+        else:
+            self.Is_flow_seperation = False
+            self.phase_separation_target_exitpressure_PA = None
+            self.real_exit_expansion_ratio = None
+            self.real_exit_area = None
+            self.real_exit_radius = None
 
+    def calculate_phase_separation_exit_area(self, chamberpressure_psi, of_ratio,
+                                             CEAforRocket, ambient_pressure_pa):
+        """Calculate the separation area from the coupled Schmucker criterion.
+
+        The area is reported even when the installed nozzle is not separated;
+        ``Is_flow_seperation`` indicates whether the current nozzle exit
+        pressure is already below the separation threshold.
+        """
+        if min(chamberpressure_psi, of_ratio, ambient_pressure_pa,
+               self.throatarea) <= 0:
+            raise ValueError("Phase-separation exit-area calculation requires positive inputs")
+
+        chamberpressure_pa = chamberpressure_psi * 6894.76
+        def pressure_residual(expansion_ratio):
+            pc_over_pe = CEAforRocket.get_PcOvPe(
+                Pc=chamberpressure_psi, MR=of_ratio, eps=expansion_ratio
+            )
+            exit_pressure_pa = chamberpressure_pa / pc_over_pe
+            separation_mach = CEAforRocket.get_MachNumber(
+                Pc=chamberpressure_psi, MR=of_ratio, eps=expansion_ratio
+            )
+            separation_pressure_pa = ambient_pressure_pa * (
+                1.88 * separation_mach - 1
+            ) ** 0.64
+            return exit_pressure_pa - separation_pressure_pa
+
+        # CEA requires eps > 1 for an expanded nozzle. Increase the upper
+        # bracket until its exit pressure falls below the requested target.
+        lower_eps = 1.000001
+        upper_eps = 2.0
+        while pressure_residual(upper_eps) > 0 and upper_eps < 1_000_000:
+            upper_eps *= 2
+        if pressure_residual(upper_eps) > 0:
+            raise ValueError("Could not bracket an expansion ratio for the phase-separation pressure target")
+
+        self.real_exit_expansion_ratio = scp.optimize.brentq(
+            pressure_residual, lower_eps, upper_eps
+        )
+        self.real_exit_area = self.real_exit_expansion_ratio * self.throatarea
+        self.real_exit_radius = np.sqrt(self.real_exit_area / np.pi)
+        separation_mach = CEAforRocket.get_MachNumber(
+            Pc=chamberpressure_psi, MR=of_ratio,
+            eps=self.real_exit_expansion_ratio
+        )
+        self.phase_separation_target_exitpressure_PA = ambient_pressure_pa * (
+            1.88 * separation_mach - 1
+        ) ** 0.64
        
 
     def Thrust(self,FuelGrainMath,Is_sim_flight,OutPressure_PA,PressureOutsidePa,NozzleExitArea,RawSillyMotorEffceincy,Ncomb_ForChamberPressure,RealTime,Timestep,mdotnozzle):

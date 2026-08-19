@@ -1,59 +1,112 @@
-import time as time_module
+"""Solve Eq. 43 for the chamber friction factor, f_c."""
+
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib as mpl
-import scipy as scp
-import rocketcea as rcea
-from CoolProp.CoolProp import PropsSI
-from rocketcea.cea_obj import CEA_Obj
-import CoolProp.CoolProp as CP
-import sys
-import inputs_io
-from rocketcea.cea_obj import CEA_Obj, add_new_fuel, add_new_oxidizer, add_new_propellant
+from scipy.optimize import brentq
 
-H=1
-S=945
-P=2758000
-Q=1
-D=45.91952720046596
-p2=1552511.7673627536
-pressureup=800*6894.76
 
-Entropyup=PropsSI('S','P',pressureup,'Q',Q,'N2O')
-enthapyup=PropsSI('H','P',pressureup,'Q',Q,'N2O')
+def calculate_fc(epsilon, r0, R):
+    """Return ``F_c`` from the supplied Reynolds-free implicit relation.
 
-downstream_pressures=np.linspace(50*6894.76,pressureup,200)
-enthalpyDiffs=[]
-downstream_density=PropsSI('D','P',downstream_pressures,'S',Entropyup,'N2O')
-upstream_density=PropsSI('D','P',pressureup,'Q',0,'N2O')
-for pressuredown in downstream_pressures:
-	Ethapydown=PropsSI('H','P',pressuredown,'S',Entropyup,'N2O')
-	enthalpyDiffs.append(enthapyup-Ethapydown)
+    1 / sqrt(F_c) = -0.923 * ln(
+        0.104 * epsilon/F_c * sqrt(r0/R)
+    )
 
-enthalpyDiffs=np.array(enthalpyDiffs)
+    ``r0`` and ``R`` must use the same length unit.
+    """
+    if min(epsilon, r0, R) <= 0:
+        raise ValueError("epsilon, r0, and R must all be positive")
 
-print(Entropyup, enthapyup)
-mdotspi=0.44*np.sqrt(2*upstream_density*(pressureup-downstream_pressures))
-mdothem=0.9*np.sqrt(2*downstream_density*(enthalpyDiffs*1000))
+    radius_ratio_sqrt = np.sqrt(r0 / R)
 
-plt.figure(figsize=(8,5))
-plt.plot(downstream_pressures/6894.76, mdothem, label='mdothem', linewidth=2)
-plt.plot(downstream_pressures/6894.76, mdotspi, label='mdotspi', linewidth=2)
-plt.xlim(800, 50)
-plt.xlabel('Downstream pressure (psi)')
-plt.ylabel('Mass flow rate proxy')
-plt.title('mdothem and mdotspi vs downstream pressure\n(800 to 50 psi, upstream state held constant)')
-plt.grid(True, alpha=0.3)
-plt.legend()
-plt.tight_layout()
+    def equation_residual(fc):
+        logarithm_argument = 0.104 * epsilon / fc * radius_ratio_sqrt
+        return 1 / np.sqrt(fc) + 0.923 * np.log(logarithm_argument)
 
-plt.figure(figsize=(8,5))
-plt.plot(downstream_pressures/6894.76, (enthalpyDiffs**1/2)*downstream_density, linewidth=2)
-plt.xlim(800, 50)
-plt.xlabel('Downstream pressure (psi), shown from 800 to 50')
-plt.ylabel('Density x sqrt(Enthalpy difference)')
-plt.title('Scaled enthalpy difference vs downstream pressure\n(800 to 50 psi, upstream state held constant)')
-plt.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.show()
+    # Eq. 43 is implicit in f_c. Find a positive bracket, then solve it.
+    candidates = np.logspace(-12, 0, 1000)
+    residuals = [equation_residual(fc) for fc in candidates]
+    for lower, upper, f_lower, f_upper in zip(
+        candidates[:-1], candidates[1:], residuals[:-1], residuals[1:]
+    ):
+        if f_lower == 0:
+            return lower
+        if f_lower * f_upper < 0:
+            return brentq(equation_residual, lower, upper)
+
+    raise ValueError("The Reynolds-free equation has no positive F_c solution between 1e-12 and 1")
+
+
+def calculate_tau_w(f_darcy, gas_density, velocity):
+    """Return tau_w = (f_D / 8) * rho * U^2."""
+    if min(f_darcy, gas_density, velocity) <= 0:
+        raise ValueError("f_darcy, gas_density, and velocity must be positive")
+    # tau_w = (f_D / 8) * rho * U^2
+    return (f_darcy / 8) * gas_density * velocity ** 2
+
+
+def calculate_blowing_from_shear(surface_mass_flux, edge_velocity, tau_w):
+    """Return beta_bl = ((rho*v)_s * u_e) / tau_w."""
+    if min(surface_mass_flux, edge_velocity, tau_w) <= 0:
+        raise ValueError("surface_mass_flux, edge_velocity, and tau_w must be positive")
+    # beta_bl = ((rho*v)_s * u_e) / tau_w
+    return surface_mass_flux * edge_velocity / tau_w
+
+
+def calculate_blowing_from_cf(surface_mass_flux, gas_density, edge_velocity, cf):
+    """Return beta_bl = (rho*v)_s / (rho_e * u_e * c_f / 2)."""
+    if min(surface_mass_flux, gas_density, edge_velocity, cf) <= 0:
+        raise ValueError("surface_mass_flux, gas_density, edge_velocity, and cf must be positive")
+    return surface_mass_flux / (gas_density * edge_velocity * cf / 2)
+
+
+# Starter values for the current hybrid-motor geometry.  r0 and R are the
+# initial port radius. Epsilon is the relative roughness term used by the
+# supplied equation.
+
+R0_M = 0.05490841665503017/2
+R_M = 0.0864976836337236/2 
+EPSILON = (100.0*10**-6)/R0_M
+#EPSILON = 
+# Representative first-iteration chamber-flow values.  ``SURFACE_MASS_FLUX``
+# is (rho*v)_s: fuel mass flow divided by total burning surface area.
+GAS_DENSITY_KG_M3 = 2.3135844874357803
+EDGE_VELOCITY_M_S = 1354.8140684211392
+SURFACE_MASS_FLUX_KG_M2_S = 1.3
+
+
+if __name__ == "__main__":
+    fc = calculate_fc(EPSILON, R0_M, R_M)
+    f_darcy = fc  # Per your instruction: f_D = f_c.
+    cf_for_blowing =  0.007144848566594666 # Replace this with a separate supplied c_f if needed.
+    tau_w = calculate_tau_w(f_darcy, GAS_DENSITY_KG_M3, EDGE_VELOCITY_M_S)
+    blowing_from_shear = calculate_blowing_from_shear(
+        SURFACE_MASS_FLUX_KG_M2_S,
+        EDGE_VELOCITY_M_S,
+        tau_w,
+    )
+    blowing_from_cf = calculate_blowing_from_cf(
+        SURFACE_MASS_FLUX_KG_M2_S,
+        GAS_DENSITY_KG_M3,
+        EDGE_VELOCITY_M_S,
+        cf_for_blowing,
+    )
+    print("Reynolds-free F_c inputs:")
+    print(f"  epsilon = {EPSILON:g}")
+    print(f"  r0      = {R0_M:.4f} m")
+    print(f"  R       = {R_M:.4f} m")
+    print(f"  F_c     = {fc:.8g}")
+    print("\nWall-shear and blowing inputs:")
+    print(f"  rho_e   = {GAS_DENSITY_KG_M3:.4g} kg/m^3")
+    print(f"  u_e     = {EDGE_VELOCITY_M_S:.4g} m/s")
+    print(f"  (rho*v)_s = {SURFACE_MASS_FLUX_KG_M2_S:.4g} kg/(m^2 s)")
+    print(f"  f_D     = {f_darcy:.8g}  (set equal to f_c)")
+    print(f"  c_f     = {cf_for_blowing:.8g}")
+    print(f"  tau_w   = {tau_w:.8g} Pa")
+    print("\nBlowing-number comparison:")
+    print(f"  beta from ((rho*v)_s*u_e)/tau_w = {blowing_from_shear:.8g}")
+    print(f"  beta from (rho*v)_s/(rho_e*u_e*f_c/2) = {blowing_from_cf:.8g}")
+    print(f"  absolute difference = {abs(blowing_from_shear - blowing_from_cf):.3e}")
+blowingratio=(blowing_from_cf/blowing_from_shear)**0.77
+print(f"blowing ratio = {blowingratio:.8g}")
+blowingratio2=(4*cf_for_blowing/(4*fc))**0.77
+print(f"blowing ratio 2 = {blowingratio2:.8g}")

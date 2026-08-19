@@ -82,6 +82,8 @@ chamberviscosity2=cea_2.get_Chamber_Transport(Pc=chamber_pressure_psi, MR=0, eps
 #meanviscosity=(chamberviscosity1+chamberviscosity2)/2
 molecularweight=(cea_2.get_Chamber_MolWt_gamma(Pc=chamber_pressure_psi, MR=mixture_ratio, eps=1, )[0])*0.45359237
 meanmolecularweight=(MwOxi+molecularweight)/2
+print('Mean Molecular Weight:', molecularweight, 'kg/mol')
+print('Mean Molecular Weight (average):', meanmolecularweight, 'kg/mol')
 viscosity_calced=26.69*(np.sqrt(meanmolecularweight*bulktemp/(sigma_hardspherediameter**2)))*10**-7
 print(viscosity_calced,meanmolecularweight,molecularweight)
 
@@ -261,6 +263,7 @@ def get_temps(pressure,OF,list_of_constants):
 
 def get_dynamic_viscosity(pressure,OF,bulktemp):
         moleweightmixture=(cea_2.get_Chamber_MolWt_gamma(Pc=pressure, MR=OF, eps=1, )[0])*0.45359237
+
         meanmoleweight=(moleweightN20+moleweightmixture)/2
         
         viscosity=26.69*(np.sqrt(meanmoleweight*bulktemp/(sigma_hardspherediameter**2)))*10**-7

@@ -110,6 +110,7 @@ df_cdinput=pd.read_csv(inputcdcsv)
 ShowPlots = True  # default: controls pixel-method plotting; may be overridden by vertical inputs
 PlotLengthUnit = 'mm'
 PlotAreaUnit = None
+
 # 3-D fuel-grain regression defaults. These remain available when vertical
 # inputs are enabled; add matching fields to the vertical CSV to override them.
 OBJ_FILE = "goshastar.obj"            # OBJ fuel-grain file in this folder
@@ -122,7 +123,7 @@ REGRESSION_RATE_MM_PER_S = 1.0          # Normal fuel regression rate used to bu
 SIMULATION_TIME_S = 50.0                # Total regression time used to build fits
 SLIDER_STEPS = 11                       # Standalone viewer setting; motor fits use graph points below
 DISPLAY_LENGTH_UNIT = "mm"              # "mm", "cm", "m", or "in" for plots/viewer labels
-OPEN_INTERACTIVE_VIEWER = True          # Open the X/Y/Z interactive viewer after calculation
+OPEN_INTERACTIVE_VIEWER = False         # Open the X/Y/Z interactive viewer after calculation
 SMOOTH_VIEWER_RENDERING = False         # Smooth displayed slice edges; does not alter calculations
 SHOW_PLANE_PREVIEW = True               # Show plane picker before the long rasterization
 SAVE_SELECTED_PLANE_ANALYSIS = True     # Generate selected-plane CSV plus curve-fit plots
@@ -142,7 +143,7 @@ UNIT_SCALE_MM = None                    # None = auto-detect; metres=1000, milli
 USE_VERTICAL_INPUTS = True # Set to True to load from vertical CSV, False to use hardcoded values
 VERTICAL_INPUTS_FILE = 'inputs_vertical_sample1.csv'
 Exportinputs=False  # Set to True to export inputs to vertical CSV
-
+ShowPlots = True
 
 if USE_VERTICAL_INPUTS:
     import inputs_io
@@ -241,6 +242,8 @@ else:
         # flight inputs-
         wetmass=84.0 #kg
         drymass=33.75 #kg
+        # Hard upper limit for the motor simulation.  The loop will not start
+        # a timestep that would run past this value.
         burntimecutoff=20 #sec
         dragcofrominputcsv=True
         dragcoIfnotcdchart=0.7
@@ -305,6 +308,19 @@ if True:
     Whole_thing_helix= False
     effectivelengthconstant=1
     Override_effectivelengthconstant=True
+    Usepixel_calcs_SAV=True
+    burntimecutoff=100
+    # Eq. 43 epsilon used for helix f_c and blowing-number calculations.
+    # A vertical-input file can override this when it includes the same field.
+    HELIX_FC_EPSILON = 100.0*10**-6
+    # Separate c_f used by the normal blowing equation (matches TRY.PY).
+    
+    
+    # Keep the plotting choice supplied by the defaults or vertical-input file.
+    # Previously this unconditional assignment disabled the plane picker,
+    # interactive viewer, and regression plots even when they were enabled
+    # above.
+    mw_ox=PropsSI('M', 'T', Oxtanktemp, 'Q', 0, 'NitrousOxide') #kg/mol
     #OuterDiameter_inches=10.5 #change if csv is different
     
     #stuff to add to csv
@@ -617,7 +633,7 @@ OxtankMath.StuffNoPrint(OxtankVolume, Timestep, oxtankLstart,hydroD=HydrolicDiam
 
 
 FuelGrainMath=FuelGrain(FuelGrainDiameter,fuelGrain_AreaReal,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,HowmuchInj_Help,Is_fuelGrain_Helix,helixrundiameter,Is_fuelgrain_Transient,Is_start_mass_gas_input,StartMass_Gas,Is_FuelGrain_GoshaStar,OneArchlengthestimate,preccandpostvolume,start_gas_gpermole,RealTime,Is_FuelGrain_PixelMethod,helixloopdiameter=helixloopdiameter,plot_length_unit=PlotLengthUnit,plot_area_unit=PlotAreaUnit,effectivelengthconstant=effectivelengthconstant)
-FuelGrainMath.stuffnoprint(Is_FuelGrain_PixelMethod,outerdiameter_inches=OuterDiameter_inches,totalComplexArea=TotalComplexArea,Is_fuelGrain_Helix=Is_fuelGrain_Helix,revPitch=revPitch,PitchFor_Helix=PitchFor_Helix)
+FuelGrainMath.stuffnoprint(Is_FuelGrain_PixelMethod,outerdiameter_inches=OuterDiameter_inches,totalComplexArea=TotalComplexArea,Is_fuelGrain_Helix=Is_fuelGrain_Helix,revPitch=revPitch,PitchFor_Helix=PitchFor_Helix,Usepixel_calcs_SAV=Usepixel_calcs_SAV)
 FuelGrainMath.should_I_Print(Is_fuelGrain_Helix,Is_fuelgrain_Transient,Is_FuelGrain_GoshaStar,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,start_gas_gpermole,Is_start_mass_gas_input,StartMass_Gas,OneArchlengthestimate,helixrundiameter)
 
 NozzleMath=Nozzle(NozzleExpansion,NozzleThroatRad,NozzleExitRad,NozzleThoatArea,NozzleExitArea)
@@ -681,12 +697,24 @@ iteration_count = 0
 csvlist=[]
 batch_size = 50 # Write to CSV every 50 iterations
 
+# `burntimecutoff` is also available in the vertical input CSV.  Keep the
+# validation here so an accidental zero/negative value cannot silently produce
+# a confusing empty run.
+if burntimecutoff <= 0:
+    raise ValueError("burntimecutoff must be greater than zero seconds")
+
+# Tolerance avoids a floating-point round-off error preventing the final
+# intended timestep (for example, 30.0 s with a 0.01 s timestep).
+burn_time_tolerance = 1e-12
+
 # Set up profiling
 profiler = cProfile.Profile()
 profiler.enable()
 
 try:
-    while OxtankMath.totaloxmass>0.02 and NozzleMath.thrustreal>=0:
+    while (OxtankMath.totaloxmass > 0.02
+           and NozzleMath.thrustreal >= 0
+           and RealTime + Timestep <= burntimecutoff + burn_time_tolerance):
         Time()
         OxtankMath.CoolOxtankProp(RealTime)
         #OxtankMath.twophaseflow_genstuff()
@@ -731,14 +759,21 @@ try:
             if Whole_thing_helix==True:
                 FuelGrainMath.Whole_thing_helix(CEAforRocket,NozzleMath.ExpansionRatio,NozzleMath.throatarea,Is_FuelGrain_GoshaStar=Is_FuelGrain_GoshaStar,timestep=Timestep,revPitch=revPitch,PitchFor_Helix=PitchFor_Helix)
             else:
-                FuelGrainMath.helixmath(CEAforRocket,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix,revPitch,PitchFor_Helix,AmountofSmallCircles,Is_FuelGrain_PixelMethod,FuelGrainDiameter,expansionratio=NozzleMath.ExpansionRatio,OusideSmallCircle_raduis=OutsideSmallCircle_raduis,helical_archsegment=helicalarchsegmant,thoart_area=NozzleMath.throatarea)
+                FuelGrainMath.helixmath(CEAforRocket,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix,revPitch,PitchFor_Helix,AmountofSmallCircles,Is_FuelGrain_PixelMethod,FuelGrainDiameter,expansionratio=NozzleMath.ExpansionRatio,OusideSmallCircle_raduis=OutsideSmallCircle_raduis,helical_archsegment=helicalarchsegmant,thoart_area=NozzleMath.throatarea,fuelgrainlength=FuelGrainLength,mw_ox=mw_ox,Fuel_Density=Fuel_Density,oxden=OxtankMath.Den_Total,sandgrainroughness=HELIX_FC_EPSILON)
         if Is_FuelGrain_GoshaStar==True:
             FuelGrainMath.complex_area_func(FuelGrainLength,Timestep,Is_fuelGrain_Helix,Is_FuelGrain_GoshaStar,AmountofSmallCircles,Fuel_Density=Fuel_Density)
         if Is_fuelgrain_Transient==True:
-            FuelGrainMath.transeint_chamber_model(NozzleCD_ForChamberPressure,Ncomb_ForChamberPressure,NozzleMath,Fuel_Density,Timestep,Is_fuelgrain_Transient)
+            FuelGrainMath.transeint_chamber_model(NozzleCD_ForChamberPressure,Ncomb_ForChamberPressure,NozzleMath,Fuel_Density,Timestep,Is_fuelgrain_Transient,ambientpressure_pa=flighmath.pressure_pa if Is_sim_flight else PressureOutsidePa)
         NozzleMath.CEA_Values(FuelGrainMath.chamberpressure_PSI,FuelGrainMath.OF,CEAforRocket)
         NozzleMath.expansionratio()
         NozzleMath.Pressures(FuelGrainMath.chamberpressure_PA)
+        ambient_pressure_pa = flighmath.pressure_pa if Is_sim_flight else PressureOutsidePa
+        NozzleMath.flow_sepration(
+            FuelGrainMath.chamberpressure_PA, ambient_pressure_pa, NozzleMath.ExpansionRatio,
+            chamberpressure_psi=FuelGrainMath.chamberpressure_PSI,
+            of_ratio=FuelGrainMath.OF,
+            CEAforRocket=CEAforRocket,
+        )
         if Is_easy_nozzle_regression==True:
             NozzleMath.easynozzleabltion(ThoartAblationRate,ExitAblationRate,Timestep,FuelGrainMath.throatpressure_PA)
         NozzleMath.Thrust(FuelGrainMath,Is_sim_flight,flighmath.pressure_pa if Is_sim_flight else PressureOutsidePa,PressureOutsidePa,NozzleExitArea,RawSillyMotorEffceincy,Ncomb_ForChamberPressure,RealTime,Timestep,mdotnozzle=FuelGrainMath.mdotnozzle)
@@ -766,6 +801,9 @@ except Exception as e:
     print(f"Error in main loop: {e}")
     import traceback
     traceback.print_exc()
+
+if RealTime + Timestep > burntimecutoff + burn_time_tolerance:
+    print(f"Maximum burn time reached ({burntimecutoff:.2f} s); stopping motor simulation.")
 
 # Finalize output from all classes (convert all buffered rows to DataFrames)
 print("Finalizing output data...")
