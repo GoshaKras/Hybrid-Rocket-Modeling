@@ -141,9 +141,16 @@ REGRESSED_SNAPSHOT_FILENAME = "regressed_fuel_snapshot.obj"  # Snapshot OBJ file
 UNIT_SCALE_MM = None                    # None = auto-detect; metres=1000, millimetres=1
 
 USE_VERTICAL_INPUTS = True # Set to True to load from vertical CSV, False to use hardcoded values
-VERTICAL_INPUTS_FILE = 'inputs_vertical_sample1.csv'
+VERTICAL_INPUTS_FILE = 'inputs_vertical_sample.csv'
 Exportinputs=False  # Set to True to export inputs to vertical CSV
-ShowPlots = True
+ShowPlots = False
+# Vertical input files do not currently carry these optional complex-regression
+# controls, so keep that path disabled unless the flags are added explicitly.
+Do_complex_regression = False
+Print_complex_regression = False
+Use_cea_lookuptable = False
+# Used only when Use_cea_lookuptable is True.  Vertical inputs may override it.
+TotalMaxExpectedChamberPressure_PSI = 1500.0
 
 if USE_VERTICAL_INPUTS:
     import inputs_io
@@ -244,7 +251,7 @@ else:
         drymass=33.75 #kg
         # Hard upper limit for the motor simulation.  The loop will not start
         # a timestep that would run past this value.
-        burntimecutoff=20 #sec
+        burntimecutoff=2 #sec
         dragcofrominputcsv=True
         dragcoIfnotcdchart=0.7
         drouge_area=0.67 #meters
@@ -309,7 +316,13 @@ if True:
     effectivelengthconstant=1
     Override_effectivelengthconstant=True
     Usepixel_calcs_SAV=True
-    burntimecutoff=100
+    burntimecutoff=10
+    Do_complex_regression=True
+    Print_complex_regression=True
+    Use_cea_lookuptable=True
+    TotalMaxExpectedChamberPressure_PSI=1000.0
+    Max_expected_pressure_psi=500
+    Use_complex_reg_values=True
     # Eq. 43 epsilon used for helix f_c and blowing-number calculations.
     # A vertical-input file can override this when it includes the same field.
     HELIX_FC_EPSILON = 100.0*10**-6
@@ -745,16 +758,29 @@ try:
             FuelGrainMath.pixelmethodgeo(Is_fuelGrain_Helix=Is_fuelGrain_Helix,FuelGrainLength=FuelGrainLength,Fuel_Density=Fuel_Density,Timestep=Timestep,amountofsmallcircles=AmountofSmallCircles,Override_effectivelengthconstant=Override_effectivelengthconstant,effectivelengthconstant=effectivelengthconstant )
         FuelGrainMath.oxflux_func(OxtankMath.RealMassFlowRate,RealTime)
         FuelGrainMath.regression_func(OxtankMath.status,Regression_Aco,Regression_Nco,regfluxstuff,Timestep)
+        if Do_complex_regression:
+            FuelGrainMath.complexregression(
+                CEAforRocket, Fuel_Density, FuelGrainLength,
+                amount_of_slots=8,
+                timestep=Timestep,
+                OFstartguess=40,
+                mdotox=OxtankMath.RealMassFlowRate,
+                usecomplexregression=Use_complex_reg_values,
+                Do_complex_regression=Do_complex_regression,
+                Print_complex_regression=Print_complex_regression,
+                Use_cea_lookuptable=Use_cea_lookuptable,
+                cea_lookup_pressure_range_psi=(0.0, TotalMaxExpectedChamberPressure_PSI)
+            )
         
-        FuelGrainMath.simpleCircleGeo(FuelGrainLength,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix)
-        FuelGrainMath.masses_of_stuff(Fuel_Density, OxtankMath,Timestep,FuelGrainLength=FuelGrainLength)
+        if not (Do_complex_regression and Use_complex_reg_values):
+            FuelGrainMath.simpleCircleGeo(FuelGrainLength,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix)
+            FuelGrainMath.masses_of_stuff(Fuel_Density, OxtankMath,Timestep,FuelGrainLength=FuelGrainLength)
         FuelGrainMath.Ox_Fuel_Ratio(OxtankMath.RealMassFlowRate)
         FuelGrainMath.cstar_func(CEAforRocket)
         FuelGrainMath.chamberpressure_func(NozzleMath,NozzleCD_ForChamberPressure,Ncomb_ForChamberPressure,NozzleMath.throatarea,Is_fuelgrain_Transient)
         FuelGrainMath.gammas(CEAforRocket,expansionratio=NozzleMath.ExpansionRatio)
         FuelGrainMath.throatPressure(CEAforRocket)
         FuelGrainMath.densitys(CEAforRocket)
-        #FuelGrainMath.complexregression(CEAforRocket,Fuel_Density,FuelGrainLength)
         if Is_fuelGrain_Helix==True:
             if Whole_thing_helix==True:
                 FuelGrainMath.Whole_thing_helix(CEAforRocket,NozzleMath.ExpansionRatio,NozzleMath.throatarea,Is_FuelGrain_GoshaStar=Is_FuelGrain_GoshaStar,timestep=Timestep,revPitch=revPitch,PitchFor_Helix=PitchFor_Helix)
@@ -824,6 +850,9 @@ else:
                             NozzleMath.outputcsv.reset_index(drop=True)], axis=1)
     
 combined_csv.to_csv(Output, index=False)
+
+if Do_complex_regression and Print_complex_regression:
+    FuelGrainMath.export_complex_regression_csv("complex_regression.csv")
 
 # Stop profiling and print results
 profiler.disable()

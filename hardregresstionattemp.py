@@ -42,7 +42,13 @@ Oxflux=(massflowox/portArea)/10#g/s/cm2
 Oxflux=100
 print('Oxflux:', Oxflux, 'g/s/cm2')
 regression=regA*(Oxflux/10)**regN
+fuelden=930#kg/m3
+lengthinFG=portD*13.3 #m
 regression_meters=regression/1000
+
+
+
+
 print('Regression Rate:', regression, 'mm/s')
 fuelden=930#kg/m3
 WhatFuel='HTPB'
@@ -96,7 +102,8 @@ print(chamberviscosity1, chamber_velocity, reynolds_number)
 #cfstraight=0.074/(reynolds_number**0.2) 
 #cfstraight=0.0776*(((np.log10(reynolds_number)-1.88)**-2))+(60*reynolds_number**-1)
 cfstraight=0.06*(reynolds_number**-0.2)
-blowing_marxman_boundrylayer=(fuelden*regression_meters)/(chamberDensity1*chamber_velocity*cfstraight*0.5)
+blowing_marxman_boundrylayer=(fuelden*regression_meters)/(chamberDensity2*chamber_velocity*cfstraight*0.5)
+print(chamberDensity1,regression_meters,chamber_velocity,cfstraight)
 print('Blowing Ratio:', blowing_marxman_boundrylayer,'reynolds number:',reynolds_number)
 spec_blowing=blowing_marxman_boundrylayer*1.22
 enthapy_surface=(cea_2.get_Chamber_H(Pc=chamber_pressure_psi, MR=0, eps=Nozzle_expansion_ratio))*2.326 #j/g
@@ -379,6 +386,7 @@ def update_reg_slot_after_regression(list,OFstartguess,chamber_pressure_psi,list
                                 A_con=get_Acon_for_regression_slot(Local_OF=OF_local,Chamberpressure=chamber_pressure_psi,Diameter=startDiameter,x_inlength=x.distance,List_of_constants=list_of_constants,viscosity=viscosity,tempratio=temp_values[2],Nozzle_expansion_ratio=Nozzle_expansion_ratio)
                                 localregression=(A_con/fuelden)*(1+2*(((x.totalflux*startDiameter)/viscosity)**-0.22)*(2.74**((x.distance*-0.4)/lengthinFG)))*((oxflux**(list_of_constants[5]+1))*(startDiameter**list_of_constants[5]))
                                 mdotfuel=0.0
+                                lastmdotfuel=0.0
                         
                 else:
                                 # Prefer the previous-step integral mdot (`mdot_from_fit`) computed from 0->distance
@@ -410,14 +418,18 @@ def update_reg_slot_after_regression(list,OFstartguess,chamber_pressure_psi,list
                         print('mdotfuel for slot at distance', x.distance, 'm:', mdotfuel)
                         print('fuelflux for slot at distance', x.distance, 'm:', fuelflux)
                         print(iteration_count, 'iterations to converge for slot at distance', x.distance, 'm')
+                x.mdotfuel = x.peremeter*localregression*fuelden*eachsectionlength + lastmdotfuel
+                lastmdotfuel = x.mdotfuel
+                x.OF = OF_local
+                x.fuelflux =fuelflux
+                x.totalflux=oxflux+ x.fuelflux
+                
+                
                 x.totalregression += localregression * timestep
                 x.Diameter += 2 * localregression * timestep
                 x.area = x.Diameter * x.Diameter * np.pi / 4
                 x.peremeter = x.Diameter * np.pi
-                x.OF = OF_local
-                x.totalflux=oxflux+fuelflux
-                x.mdotfuel = mdotfuel
-                x.fuelflux = fuelflux
+                
                 end_regression = localregression
                 lastmdotfuel = mdotfuel
                 
@@ -649,7 +661,7 @@ for pattern in ("mdot_vs_distance*.png", "regression_vs_distance*.png", "regress
 #calc
 Local_OF=OFstartguess
 startDiameter=portD
-endtime=5
+endtime=1
 StoicOF=get_stoichiometric_of_for_species(fuel_name=WhatFuel, oxidizer_name=WhatOxidizer, chamber_pressure_psi=chamber_pressure_psi)
 list_of_constants=get_constant_values(pressure=chamber_pressure_psi,stoicOF=StoicOF)
 reg_slots=make_reg_slots(amount_of_slots=amount_of_slots, grain_length=lengthinFG, port_diameter=startDiameter, start_regression=startreg)
@@ -744,16 +756,43 @@ def reg_checker_constants(a,n,portD,massflowox):
         portD=portD
         while time<=endtime:
                 time+=timestep
-                Oxflux=massflowox/portD**2*np.pi/4
+                Oxflux=massflowox/(portD**2*np.pi/4)
                 regression=a*(Oxflux/10)**n
-                mdotfuel=regression*portD*fuelden*np.pi*lengthinFG
+                regression=regression/1000
+                mdotfuel=regression*portD*np.pi*fuelden*lengthinFG
 
                 portD=portD+2*regression*timestep
-                totalmdot=+mdotfuel*timestep
+                totalmdot+=mdotfuel*timestep
         print('Total Fuel Mass Consumed (reg_checker_constants):', totalmdot, 'kg')
         print('Final Port Diameter (reg_checker_constants):', portD, 'm')
         print('Final Regression Rate (reg_checker_constants):', regression, 'm/s')
 reg_checker_constants(a=0.304,n=0.527,portD=portD,massflowox=massflowox)
+
+
+
+def normaleasyreg(startPortD,mdotox,endtime,timestep,fglength):
+        Time=0
+        totalmdot=0
+        totalregression=0
+        while Time<=endtime:
+                if Time==0:
+                        portD=startPortD
+                
+                else:
+                        portD+=2*regression*timestep
+                portA=portD**2*np.pi/4
+                Oxflux=mdotox/portA
+                regression=(regA*(Oxflux/10)**regN)/1000
+                mdotfuel=portD*fuelden*np.pi*fglength*regression
+                totalmdot+=mdotfuel*timestep
+                Time+=timestep
+                totalregression+=regression*timestep
+        print('Total Fuel Mass Consumed (normaleasyreg):', totalmdot, 'kg')
+        print('Final Port Diameter (normaleasyreg):', portD, 'm')
+        print('Final Regression Rate (normaleasyreg):', regression, 'm/s')
+        print('Total Regression (normaleasyreg):', totalregression, 'm')
+normaleasyreg(startPortD=portD,mdotox=massflowox,endtime=endtime,timestep=timestep,fglength=lengthinFG)
+
 
 
 

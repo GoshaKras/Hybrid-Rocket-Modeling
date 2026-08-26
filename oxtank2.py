@@ -48,7 +48,7 @@ class Oxtank():
         self.liquidmassnew=StartMass_Liquid
         self.t_liquidmassnew=StartMass_Liquid
         self.AmountVaped=0
-        self.status="liquid"
+        self.status="Liquid"
         self.fizz_X=0
         self.denFizzHelp=1
         self.cheat=False

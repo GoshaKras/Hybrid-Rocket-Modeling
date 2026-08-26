@@ -1,11 +1,14 @@
 import time as time_module
 import json
+from dataclasses import dataclass
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import scipy as scp
 import rocketcea as rcea
+from rocketcea import py_cea
 from CoolProp.CoolProp import PropsSI
 from rocketcea.cea_obj import CEA_Obj
 import CoolProp.CoolProp as CP
@@ -18,6 +21,109 @@ from skimage import measure
 import trimesh
 from scipy import ndimage
 import attempyforfgreg as regression_3d
+
+
+@dataclass
+class RegressionSlot:
+    area: float
+    distance: float
+    totalregression: float
+    peremeter: float
+    Diameter: float
+    prev_regression: float
+    totalflux: float = 0.0
+    fuelflux: float =0.0
+    OF: float = 0.0
+    mdotfuel: float = 0.0
+    Nominal_port_D: float = 0.0
+    Helix_loop_d: float = 0.0
+
+
+class CEALookupTable:
+    """Persistent bilinear lookup table for complex-regression CEA states."""
+
+    def __init__(self, cea, filename, pressure_range_psi, of_range, pressure_points, of_points):
+        self.filename=Path(filename)
+        self.minimum_requested_pressure=pressure_range_psi[0]
+        # RocketCEA requires a positive pressure.  Keep the public lookup range
+        # at 0..Pmax, but evaluate the zero-pressure endpoint at 0.1 psi.
+        minimum_cea_pressure=max(pressure_range_psi[0], 0.1)
+        self.pressures=np.linspace(minimum_cea_pressure, pressure_range_psi[1], pressure_points)
+        self.of_values=np.linspace(*of_range, of_points)
+        self.signature=f"{cea.oxName}/{cea.fuelName}"
+        if not self._load():
+            self._build(cea)
+
+    def _load(self):
+        if not self.filename.exists():
+            return False
+        try:
+            with np.load(self.filename, allow_pickle=False) as data:
+                if (str(data["signature"]) != self.signature
+                        or not np.array_equal(data["pressures"], self.pressures)
+                        or not np.array_equal(data["of_values"], self.of_values)):
+                    return False
+                self.temperature=data["temperature"]
+                self.molecular_weight=data["molecular_weight"]
+                self.prandtl=data["prandtl"]
+                self.cp=data["cp"]
+            return True
+        except (OSError, KeyError, ValueError):
+            return False
+
+    def _build(self, cea):
+        shape=(len(self.pressures), len(self.of_values))
+        self.temperature=np.empty(shape)
+        self.molecular_weight=np.empty(shape)
+        self.prandtl=np.empty(shape)
+        self.cp=np.empty(shape)
+        print(f"Building CEA lookup table ({shape[0]} x {shape[1]}) at {self.filename}...")
+        for pressure_index, pressure in enumerate(self.pressures):
+            for of_index, of_value in enumerate(self.of_values):
+                cp, _, _, prandtl=cea.get_Chamber_Transport(
+                    Pc=pressure, MR=of_value, eps=1, frozen=0
+                )
+                chamber_index=cea.i_chm
+                molecular_weight=py_cea.prtout.wm[chamber_index]
+                try:
+                    molecular_weight=1.0/py_cea.prtout.totn[chamber_index]
+                except Exception:
+                    pass
+                self.temperature[pressure_index, of_index]=py_cea.prtout.ttt[chamber_index]*1.8*0.555556
+                self.molecular_weight[pressure_index, of_index]=molecular_weight*0.45359237
+                self.prandtl[pressure_index, of_index]=prandtl
+                self.cp[pressure_index, of_index]=cp
+        np.savez_compressed(
+            self.filename,
+            signature=np.asarray(self.signature), pressures=self.pressures,
+            of_values=self.of_values, temperature=self.temperature,
+            molecular_weight=self.molecular_weight, prandtl=self.prandtl, cp=self.cp,
+        )
+        print(f"Saved CEA lookup table to {self.filename}.")
+
+    def state(self, pressure, of_value):
+        """Return (T, molecular weight kg/mol, Prandtl, Cp), or None outside the table."""
+        if not (self.minimum_requested_pressure <= pressure <= self.pressures[-1]
+                and self.of_values[0] <= of_value <= self.of_values[-1]):
+            return None
+
+        pressure=max(pressure, self.pressures[0])
+
+        def interpolate(values):
+            pressure_index=np.clip(np.searchsorted(self.pressures, pressure)-1, 0, len(self.pressures)-2)
+            of_index=np.clip(np.searchsorted(self.of_values, of_value)-1, 0, len(self.of_values)-2)
+            p0, p1=self.pressures[pressure_index], self.pressures[pressure_index+1]
+            o0, o1=self.of_values[of_index], self.of_values[of_index+1]
+            pressure_fraction=(pressure-p0)/(p1-p0)
+            of_fraction=(of_value-o0)/(o1-o0)
+            return ((1-pressure_fraction)*(1-of_fraction)*values[pressure_index, of_index]
+                    + pressure_fraction*(1-of_fraction)*values[pressure_index+1, of_index]
+                    + (1-pressure_fraction)*of_fraction*values[pressure_index, of_index+1]
+                    + pressure_fraction*of_fraction*values[pressure_index+1, of_index+1])
+
+        return tuple(interpolate(values) for values in (
+            self.temperature, self.molecular_weight, self.prandtl, self.cp,
+        ))
 
 # =============================================================================
 # REGRESSION IMPLEMENTATIONS IN THIS FILE
@@ -56,6 +162,7 @@ class FuelGrain():
         self.totalregression_MM=0
         self.oxflux=None
         self.mdotfuel=0
+        self.sum_modtfuel=0
         self.sum_mdot=0
         self.totalmdot=None
         self.OF=None
@@ -369,7 +476,7 @@ class FuelGrain():
     def simpleCircleGeo(self,FuelGrainLength,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix):
         self.portperimeter= self.diameter_grain*3.14
         
-        self.insurfacearea=self.portperimeter*self.effectivelengthconstant
+        self.insurfacearea=self.portperimeter*self.effectivelengthconstant*FuelGrainLength
         self.diameter_grain=self.diameter_grain+(self.regression_M_persec*Timestep*2)
         self.fuelgrain_raduis=self.diameter_grain/2
         self.area_grain=(self.fuelgrain_raduis*self.fuelgrain_raduis*3.14)
@@ -757,6 +864,8 @@ class FuelGrain():
             #self.oldpixelcircum=self.P_perimeter
         else:
             self.mdotfuel=self.insurfacearea*Fuel_Density*self.regression_M_persec_withratio
+        self.sum_modtfuel=self.sum_modtfuel+(self.mdotfuel*Timestep)
+        
 
         
         self.totalmdot=self.mdotfuel+OxtankMath.RealMassFlowRate
@@ -816,7 +925,7 @@ class FuelGrain():
         self.chambersonicvelocity = CEAforRocket.get_SonicVelocities(Pc=self.chamberpressure_PSI, MR=self.OF, eps=expansionratio)[0]
         #except Exception:
             #self.chambersonicvelocity = 340.0
-        self.streamvelocity=self.chambersonicvelocity*self.chambermach
+        self.streamvelocity=self.chambersonicvelocity*self.chambermach*0.3048
         #self.streamvelocity=np.sqrt(2*((self.chamberpressure_PA-self.throatpressure_PA)/self.chamberDensity))
         self.chamberstuff=CEAforRocket.get_Chamber_Transport(Pc=self.chamberpressure_PSI, MR=self.OF, eps=expansionratio,frozen=0)
         self.viscosity= self.chamberstuff[1] * 0.0001# kg/m/s
@@ -851,8 +960,8 @@ class FuelGrain():
             self.helixNominalarea_star=((self.testArea-((self.bigcircleraduis)**2*3.14))/(AmountofSmallCircles*0.5))
             self.helixNominalDiameter=np.sqrt(self.helixNominalarea_star/3.14)*2
         else:
-            self.helixloopdiameter=+ self.regression_M_persec_withratio*Timestep*2
-            self.helixNominalDiameter=+ self.regression_M_persec_withratio*Timestep*2 # work this out later
+            self.helixloopdiameter+= self.regression_M_persec_withratio*Timestep*2
+            self.helixNominalDiameter+= self.regression_M_persec_withratio*Timestep*2 # work this out later
         if self.Is_pixel==True:
                     self.helixloopdiameter=self.p_helixloopdiameter
         self.helixlength_meters=revPitch*np.sqrt(((self.helixloopdiameter*3.14)**2)+(PitchFor_Helix)**2)
@@ -927,7 +1036,7 @@ class FuelGrain():
         self.fac_CR=(self.hydrolicdiamter*self.hydrolicdiamter*3.14/4)/thoart_area
         self.chambermach=CEAforRocket.get_Chamber_MachNumber(Pc=self.chamberpressure_PSI, MR=self.OF, fac_CR=self.fac_CR)
         self.chambersonicvelocity = CEAforRocket.get_SonicVelocities(Pc=self.chamberpressure_PSI, MR=self.OF, eps=expansionratio)[0]
-        self.streamvelocity=self.chambersonicvelocity*self.chambermach
+        self.streamvelocity=self.chambersonicvelocity*self.chambermach*0.3048
         self.chamberstuff=CEAforRocket.get_Chamber_Transport(Pc=self.chamberpressure_PSI, MR=self.OF, eps=expansionratio,frozen=0)
         self.viscosity= self.chamberstuff[1] * 0.0001# kg/m/s
         
@@ -1039,6 +1148,13 @@ class FuelGrain():
             self.SpecR=8314/self.MW_chamber
             self.throatcrit_ratio=(2/(self.gamma_throat+1))**((self.gamma_throat+1)/(2*(self.gamma_throat-1)))
             self.realthroatratio=ambientpressure_pa/self.newchamberpressure_PA
+            if self.time>Timestep:
+                self.delatTemp=(self.chamber_temp-self.oldchambertemp)/Timestep
+                self.deltaSpecR=(self.SpecR-self.oldSpecR)/Timestep
+            else:
+                self.delatTemp=0
+                self.deltaSpecR=0
+
             if self.realthroatratio>self.throatcrit_ratio:
                 self.Chocked_status=False
             else:
@@ -1051,51 +1167,425 @@ class FuelGrain():
             self.volumeflowrate2=self.volume_grain-self.oldvolumegrain
             self.oldvolumegrain=self.volume_grain
             self.massGas=self.massGas+(self.mdotgain*Timestep)
-            self.deltaPressure_PA=self.newchamberpressure_PA*((self.mdotgain/self.massGas)-(self.volumeflowrate/self.volume_grain))
+            self.deltaPressure_PA=self.newchamberpressure_PA*((self.mdotgain/self.massGas)-(self.volumeflowrate/self.volume_grain)+(self.delatTemp/self.chamber_temp)+(self.deltaSpecR/self.SpecR))
             self.newchamberpressure_PA=self.newchamberpressure_PA+self.deltaPressure_PA*Timestep
             self.newchamberpressure_psi=self.newchamberpressure_PA/6894.76
             self.sum_mdot=self.sum_mdot+(self.mdotnozzle*Timestep)
+            self.oldSpecR=self.SpecR
+            self.oldchambertemp=self.chamber_temp
     
-    def complexregression(self,CEAforRocket,FuelDensity,FuelGrainLength):
-        self.chamber_Cp=CEAforRocket.get_Chamber_Cp(Pc=self.chamberpressure_PSI, MR=self.OF)*4.184 #convert from btu/lb-R to kJ/kg-K
-        self.walltemp_kelvin=725 #estimate
-        self.temp_kelvin=[(t/1.8) for t in CEAforRocket.get_Temperatures(Pc=self.chamberpressure_PSI, MR=self.OF)]
-        self.chambertemp_kelvin=self.temp_kelvin[1]
-        self.layerchangecon=0.8 # estimate how much less 
-        self.deltaEnthapy=self.chamber_Cp*(self.chambertemp_kelvin*self.layerchangecon-self.walltemp_kelvin)
-        self.heatof_gassification=350*1000 #kJ/kg estimate
-        self.BlowingCo=self.deltaEnthapy/self.heatof_gassification
-        self.use_blowingco=self.BlowingCo**0.23
-        self.chamber_stuff=CEAforRocket.get_Chamber_Transport(Pc=self.chamberpressure_PSI, MR=self.OF, eps=1, frozen=0)
-        self.prandtl_number=self.chamber_stuff[3]
-        self.prandtl_number=1.0 # fudge this to see if it helps with the regression rate
-        self.viscosity_forweirdreg= self.chamber_stuff[1] * 0.0001# kg/m/s
-        self.fuelgrain_length=FuelGrainLength
-        a=1
-        n=0.8
-        m=1-n
-        p1=a/n
-        p2=0.0376/((self.prandtl_number**(2/3))*FuelDensity)
-        p3=(self.enthapy_vaporpyrolsis_fuel/self.fuelgrain_length)**(m)
-        p4=self.oxflux*m
-        p5=(m*4*a/n)/(n*(2-m))
-        p6=0.0376/((self.prandtl_number**(2/3)))
-        p7=(self.viscosity_forweirdreg**m)/(self.hydrolicdiamter*self.fuelgrain_length**n)
-        p8=n/m
-        p9=(p1*p2*self.use_blowingco*p3)
-        p10=(p4+self.use_blowingco*p5*p6*p7)**p8
-        self.regression2=p9*p10
-        self.maybe_A=(a/n)*(0.0376/((self.prandtl_number**(2/3))*FuelDensity))*self.use_blowingco*self.viscosity_forweirdreg**m
-        self.streamvelocity=np.sqrt(2*((self.chamberpressure_PA-self.throatpressure_PA)/self.chamberDensity))
-        self.reynoldsnumber_forReg=(self.streamvelocity*self.hydrolicdiamter*self.chamberDensity)/self.viscosity_forweirdreg
-        self.cfstraight_forreg=0.0776*(((np.log10(self.reynoldsnumber_forReg)-1.88)**-2))+(60*self.reynoldsnumber_forReg**-1)
-        self.reg3=((0.635*self.oxflux)/(self.prandtl_number**(2/3)*FuelDensity))*self.use_blowingco*self.cfstraight_forreg
+    def complexregression(self, CEAforRocket, FuelDensity, FuelGrainLength,
+                          amount_of_slots, timestep, OFstartguess, mdotox,
+                          Do_complex_regression=False,
+                          Print_complex_regression=False,
+                          Use_cea_lookuptable=False,
+                          cea_lookup_filename="cea_complex_regression.npz",
+                          cea_lookup_pressure_range_psi=(0.0, 1500.0),
+                          cea_lookup_of_range=(0.0, 30.0),
+                          cea_lookup_pressure_points=31,
+                          cea_lookup_of_points=61,
+                          usecomplexregression=False):
+        """Near-verbatim port of hardregresstionattemp.py from line 214.
 
+        Variable names and the original calculation order are intentionally
+        retained so they can be mapped to this class manually.
+        """
+        if not Do_complex_regression:
+            return []
 
+        amount_of_sections=amount_of_slots-1
+        # ``totalregression`` is the radial change from the initial local
+        # diameter, so both quantities must start at zero deformation.
+        startreg=0.0
+        lengthinFG=FuelGrainLength
+        portD=self.diameter_grain
+        fuelden=FuelDensity
+        massflowox=mdotox
+        chamber_pressure_psi=self.chamberpressure_PSI
+        Nozzle_expansion_ratio=1
+        moleweightN20=44.013
+        sigma_hardspherediameter=5
+        ref_temp_H=298
+        Hg_frompaper=1812
+        koX=1
+        activation_energy=203*1000
+        eachsectionlength=lengthinFG/amount_of_sections
+        lookup_table=None
+        if Use_cea_lookuptable:
+            lookup_key=(
+                str(cea_lookup_filename), tuple(cea_lookup_pressure_range_psi),
+                tuple(cea_lookup_of_range), cea_lookup_pressure_points,
+                cea_lookup_of_points, CEAforRocket.oxName, CEAforRocket.fuelName,
+            )
+            if getattr(self, "_cea_lookup_key", None) != lookup_key:
+                self._cea_lookup_table=CEALookupTable(
+                    CEAforRocket, cea_lookup_filename, cea_lookup_pressure_range_psi,
+                    cea_lookup_of_range, cea_lookup_pressure_points, cea_lookup_of_points,
+                )
+                self._cea_lookup_key=lookup_key
+            lookup_table=self._cea_lookup_table
+            if getattr(self, "_cea_lookup_announced_key", None) != lookup_key:
+                print(
+                    "Using CEA lookup table: "
+                    f"{cea_lookup_filename} "
+                    f"(Pc {cea_lookup_pressure_range_psi[0]:g}–{cea_lookup_pressure_range_psi[1]:g} psi, "
+                    f"O/F {cea_lookup_of_range[0]:g}–{cea_lookup_of_range[1]:g})."
+                )
+                self._cea_lookup_announced_key=lookup_key
+        # CEA calls dominate runtime.  Cache exact state queries for this
+        # timestep; no pressure/O/F rounding is used, so this does not alter
+        # any regression inputs or equations.
+        cea_state_cache={}
 
+        def get_local_cea_state(pressure, OF, expansion_ratio=1):
+            key=(pressure, OF, expansion_ratio)
+            if key not in cea_state_cache:
+                if lookup_table is not None:
+                    lookup_state=lookup_table.state(pressure, OF)
+                    if lookup_state is not None:
+                        cea_state_cache[key]=lookup_state
+                        return cea_state_cache[key]
+                # get_Chamber_Transport performs one CEA solve.  Its result
+                # leaves the exact chamber temperature and molecular-weight
+                # fields in RocketCEA's common Fortran output block, so do
+                # not make a second get_IvacCstrTc_ChmMwGam solve for them.
+                cp, _, _, prandtl_number=CEAforRocket.get_Chamber_Transport(
+                    Pc=pressure, MR=OF, eps=expansion_ratio, frozen=0
+                )
+                chamber_index=CEAforRocket.i_chm
+                temperature_rankine=py_cea.prtout.ttt[chamber_index]*1.8
+                molecular_weight=py_cea.prtout.wm[chamber_index]
+                try:
+                    molecular_weight=1.0/py_cea.prtout.totn[chamber_index]
+                except Exception:
+                    pass
+                cea_state_cache[key]=(
+                    temperature_rankine*0.555556,
+                    molecular_weight*0.45359237,
+                    prandtl_number,
+                    cp,
+                )
+            return cea_state_cache[key]
 
+        def make_reg_slots(amount_of_slots=amount_of_slots, grain_length=lengthinFG, port_diameter=portD, start_regression=startreg):
+            slots=[]
+            for x in range(amount_of_slots):
+                if amount_of_slots <= 1:
+                    length = 0
+                else:
+                    length=x*(grain_length/amount_of_sections)
+                Diameter=port_diameter
+                area=Diameter*Diameter*np.pi/4
+                peremeter=Diameter*np.pi
+                slot=RegressionSlot(area=area,distance=length,totalregression=start_regression,peremeter=peremeter,Diameter=Diameter,prev_regression=start_regression)
+                slot.initial_diameter=Diameter
+                slots.append(slot)
+            return slots
 
-        
+        def get_constant_values(pressure,stoicOF):
+            if lookup_table is None:
+                temp_of_flame=(CEAforRocket.get_Temperatures(Pc=pressure, MR=stoicOF, eps=1, frozen=0)[0])*0.555556
+                temp_of_surface=(CEAforRocket.get_Temperatures(Pc=chamber_pressure_psi, MR=0, eps=1, frozen=0)[0])*0.555556
+                specific_heat_surface=(CEAforRocket.get_Chamber_Cp(Pc=pressure, MR=0, eps=1)*4.184)
+                specific_heat_flame=(CEAforRocket.get_Chamber_Cp(Pc=pressure, MR=stoicOF, eps=1)*4.184)
+            else:
+                flame_state=get_local_cea_state(pressure,stoicOF)
+                surface_state=get_local_cea_state(chamber_pressure_psi,0.0)
+                temp_of_flame=flame_state[0]
+                temp_of_surface=surface_state[0]
+                specific_heat_surface=surface_state[3]*4.184
+                specific_heat_flame=flame_state[3]*4.184
+            deltaH=specific_heat_flame*(temp_of_flame-ref_temp_H)-specific_heat_surface*(temp_of_surface-ref_temp_H)
+            enthapy_ratio=(deltaH/Hg_frompaper)
+            Phi_C=(1.22*stoicOF*enthapy_ratio)/(koX+(stoicOF+koX)*enthapy_ratio)
+            k_constant=(-0.005*(activation_energy/(8.314*temp_of_surface)))-0.08
+            return [deltaH,temp_of_surface,temp_of_flame,enthapy_ratio,Phi_C,k_constant]
+
+        def get_temps(pressure,OF,list_of_constants):
+            temp_cea_local=get_local_cea_state(pressure,OF)[0]
+            bulktemp_local=(temp_cea_local+list_of_constants[1]+list_of_constants[2])/3
+            tempratio_local=(list_of_constants[1]/bulktemp_local)
+            return [temp_cea_local,bulktemp_local,tempratio_local]
+
+        def get_dynamic_viscosity(pressure,OF,bulktemp):
+            moleweightmixture=get_local_cea_state(pressure,OF)[1]
+            meanmoleweight=(moleweightN20+moleweightmixture)/2
+            return 26.69*(np.sqrt(meanmoleweight*bulktemp/(sigma_hardspherediameter**2)))*10**-7
+
+        def get_Acon_for_regression_slot(Local_OF,Chamberpressure,Diameter,x_inlength,List_of_constants,viscosity,tempratio,Nozzle_expansion_ratio=Nozzle_expansion_ratio):
+            prandtl_number=get_local_cea_state(Chamberpressure,Local_OF,Nozzle_expansion_ratio)[2]
+            Lcon_local=0.29+(0.0019*(x_inlength/Diameter))
+            return ((0.022*(prandtl_number**-0.6)*(List_of_constants[4]**0.77)*(List_of_constants[3]**0.23))/((viscosity**List_of_constants[5])*(tempratio**Lcon_local)))
+
+        def update_reg_slot_1(list,OFstartguess,chamber_pressure_psi,list_of_constants,startDiameter,current_time=0.0,verbose=True):
+            last_regression=0.0
+            end_regression=0.0
+            lastmdotfuel=0.0
+            for x in list:
+                iterate=True
+                iteration_count=0
+                oxflux=massflowox/x.area
+                while iterate==True:
+                    if x.distance==0:
+                        fuelflux=oxflux/OFstartguess
+                        x.totalflux=oxflux+fuelflux
+                        temp_values=get_temps(chamber_pressure_psi,OFstartguess,list_of_constants)
+                        viscosity=get_dynamic_viscosity(chamber_pressure_psi,OFstartguess,temp_values[1])
+                        A_con=get_Acon_for_regression_slot(OFstartguess,chamber_pressure_psi,startDiameter,x.distance,list_of_constants,viscosity,temp_values[2])
+                        localregression=(A_con/fuelden)*(1+2*(((x.totalflux*startDiameter)/viscosity)**-0.22)*(2.74**((x.distance*-0.4)/lengthinFG)))*((oxflux**(list_of_constants[5]+1))*(startDiameter**list_of_constants[5]))
+                        end_regression=localregression
+                        last_regression=localregression
+                        mdotfuel=0.0
+                        iterate=False
+                    else:
+                        mdotfuel=(fuelden*((last_regression + end_regression)/2)*x.peremeter*eachsectionlength)+lastmdotfuel
+                        OF_local=massflowox/mdotfuel
+                        if OF_local>OFstartguess:
+                            OF_local=OFstartguess
+                            mdotfuel=massflowox/OFstartguess
+                        fuelflux=mdotfuel/x.area
+                        x.totalflux=oxflux+fuelflux
+                        temp_values=get_temps(chamber_pressure_psi,OF_local,list_of_constants)
+                        viscosity=get_dynamic_viscosity(chamber_pressure_psi,OF_local,temp_values[1])
+                        A_con=get_Acon_for_regression_slot(OF_local,chamber_pressure_psi,startDiameter,x.distance,list_of_constants,viscosity,temp_values[2])
+                        localregression=(A_con/fuelden)*(1+2*(((x.totalflux*startDiameter)/viscosity)**-0.22)*(2.74**((x.distance*-0.4)/lengthinFG)))*((oxflux**(list_of_constants[5]+1))*(startDiameter**list_of_constants[5]))
+                        amount_reg_difference=abs(1-(localregression/last_regression))
+                        last_regression=localregression
+                        iteration_count+=1
+                        if amount_reg_difference<0.0001:
+                            iterate=False
+                x.prev_regression = localregression
+                x.Diameter += 2*localregression*timestep
+                # Match hardregresstionattemp.py: retain the running radial
+                # regression total rather than deriving it from diameter.
+                x.totalregression += localregression*timestep
+                x.area = x.Diameter*x.Diameter*np.pi/4
+                x.peremeter = x.Diameter*np.pi
+                x.OF = OFstartguess if x.distance==0 else OF_local
+                x.totalflux=oxflux+fuelflux
+                x.mdotfuel=mdotfuel
+                x.fuelflux=fuelflux
+                end_regression=localregression
+                lastmdotfuel=mdotfuel
+            return list
+
+        def update_reg_slot_after_regression(list,OFstartguess,chamber_pressure_psi,list_of_constants,startDiameter,current_time=0.0,verbose=True):
+            """Second-and-later-step updater from hardregresstionattemp.py."""
+            last_regression=0.0
+            end_regression=0.0
+            lastmdotfuel=0.0
+            mdotfuel=0.0
+            localregression=0.0
+            fuelflux=0.0
+            OF_local=OFstartguess
+            for x in list:
+                iterate=True
+                iteration_count=0
+                oxflux=massflowox/x.area
+                if x.distance==0:
+                    fuelflux=oxflux/OFstartguess
+                    x.totalflux=oxflux+fuelflux
+                    temp_values=get_temps(chamber_pressure_psi,OF_local,list_of_constants)
+                    viscosity=get_dynamic_viscosity(chamber_pressure_psi,OF_local,temp_values[1])
+                    A_con=get_Acon_for_regression_slot(OF_local,chamber_pressure_psi,startDiameter,x.distance,list_of_constants,viscosity,temp_values[2])
+                    localregression=(A_con/fuelden)*(1+2*(((x.totalflux*startDiameter)/viscosity)**-0.22)*(2.74**((x.distance*-0.4)/lengthinFG)))*((oxflux**(list_of_constants[5]+1))*(startDiameter**list_of_constants[5]))
+                    mdotfuel=0.0
+                    lastmdotfuel=0.0
+                else:
+                    # Match the standalone fallback and cap behavior.
+                    prevstep_cumulative=getattr(x, 'mdot_from_fit', None)
+                    if prevstep_cumulative is not None:
+                        mdotfuel=prevstep_cumulative
+                    else:
+                        mdotfuel=massflowox/OFstartguess
+                    if mdotfuel <= 0:
+                        mdotfuel=1e-12
+                    OF_local=massflowox/mdotfuel
+                    if OF_local>OFstartguess:
+                        OF_local=OFstartguess
+                        mdotfuel=massflowox/OF_local
+                    fuelflux=mdotfuel/x.area
+                    x.totalflux=oxflux+fuelflux
+                    temp_values=get_temps(chamber_pressure_psi,OF_local,list_of_constants)
+                    viscosity=get_dynamic_viscosity(chamber_pressure_psi,OF_local,temp_values[1])
+                    A_con=get_Acon_for_regression_slot(OF_local,chamber_pressure_psi,startDiameter,x.distance,list_of_constants,viscosity,temp_values[2])
+                    localregression=(A_con/fuelden)*(1+2*(((x.totalflux*startDiameter)/viscosity)**-0.22)*(2.74**((x.distance*-0.4)/lengthinFG)))*((oxflux**(list_of_constants[5]+1))*(startDiameter**list_of_constants[5]))
+                x.prev_regression = localregression
+                if verbose:
+                    print('Regression Rate for slot at distance', x.distance, 'm:', localregression*1000, 'mm/s',current_time, 's')
+                    print('OF for slot at distance', x.distance, 'm:', OF_local)
+                    print('mdotfuel for slot at distance', x.distance, 'm:', mdotfuel)
+                    print('fuelflux for slot at distance', x.distance, 'm:', fuelflux)
+                    print(iteration_count, 'iterations to converge for slot at distance', x.distance, 'm')
+                x.mdotfuel = x.peremeter*localregression*fuelden*eachsectionlength + lastmdotfuel
+                lastmdotfuel = x.mdotfuel
+                x.OF = OF_local
+                x.fuelflux =fuelflux
+                x.totalflux=oxflux+ x.fuelflux
+
+                x.totalregression += localregression * timestep
+                x.Diameter += 2 * localregression * timestep
+                x.area = x.Diameter * x.Diameter * np.pi / 4
+                x.peremeter = x.Diameter * np.pi
+
+                end_regression = localregression
+                lastmdotfuel = mdotfuel
+            return list
+
+        def update_mdot_from_previous_profile(slots, target_r2=0.98, max_degree=6):
+            """Reproduce hardregresstionattemp.py's polynomial-fit mdot pass.
+
+            The standalone model fits ``previous regression * perimeter`` as
+            a function of axial distance, analytically integrates that fitted
+            polynomial from the inlet to each station, then multiplies by
+            density.  Keep the same fit order selection and normalization
+            here so ``mdot_from_fit`` has the same meaning in both models.
+            """
+            if not slots:
+                return
+
+            ordered_slots=sorted(slots, key=lambda slot: slot.distance)
+            x=np.asarray([slot.distance for slot in ordered_slots], dtype=float)
+            y=np.asarray(
+                [slot.prev_regression*slot.peremeter for slot in ordered_slots],
+                dtype=float,
+            )
+            valid_mask=np.isfinite(x) & np.isfinite(y)
+            x=x[valid_mask]
+            y=y[valid_mask]
+            if len(x)<2:
+                for slot in slots:
+                    slot.mdot_from_fit=0.0
+                return
+
+            x_mean=np.mean(x)
+            x_scale=np.max(np.abs(x-x_mean))
+            if x_scale==0:
+                x_scale=1.0
+            x_norm=(x-x_mean)/x_scale
+
+            best_r2=-np.inf
+            best_coeffs=None
+            max_d=min(max_degree, len(x)-1)
+            for degree in range(1, max_d+1):
+                coeffs_norm=np.polyfit(x_norm, y, degree)
+                fitted=np.poly1d(coeffs_norm)(x_norm)
+                ss_res=np.sum((y-fitted)**2)
+                ss_tot=np.sum((y-np.mean(y))**2)
+                r2=1-(ss_res/ss_tot) if ss_tot!=0 else 1.0
+                if r2>best_r2:
+                    best_r2=r2
+                    best_coeffs=coeffs_norm
+                if r2>=target_r2:
+                    break
+
+            # This is the same un-normalization and analytical integration
+            # used by plot_mdot_vs_distance() in hardregresstionattemp.py.
+            u_poly=np.poly1d([1.0/x_scale, -x_mean/x_scale])
+            poly_norm=np.poly1d(best_coeffs)
+            poly_x=np.poly1d([0.0])
+            for index, coefficient in enumerate(poly_norm.coeffs):
+                degree=len(poly_norm.coeffs)-index-1
+                poly_x=poly_x+coefficient*(u_poly**degree)
+            integral_poly_x=poly_x.integ()
+            inlet_distance=0.0
+
+            for slot in slots:
+                volume_flow=float(integral_poly_x(slot.distance)-integral_poly_x(inlet_distance))
+                slot.mdot_from_fit=fuelden*volume_flow
+
+        # Stoichiometric O/F is fixed for a given CEA fuel/oxidizer object.
+        if not hasattr(self, "_complex_stoich_of"):
+            self._complex_stoich_of=CEAforRocket.getMRforER(ERphi=1.0)
+        StoicOF=self._complex_stoich_of
+        list_of_constants=get_constant_values(chamber_pressure_psi,StoicOF)
+        if not hasattr(self, "regression_slots"):
+            self.regression_slots=make_reg_slots()
+            self.complex_regression_history=[]
+            self.complex_total_fuel_mass_kg=0.0
+            self.regression_slots=update_reg_slot_1(self.regression_slots,OFstartguess,chamber_pressure_psi,list_of_constants,portD,current_time=self.time,verbose=False)
+        else:
+            update_mdot_from_previous_profile(self.regression_slots)
+            self.regression_slots=update_reg_slot_after_regression(self.regression_slots,OFstartguess,chamber_pressure_psi,list_of_constants,portD,current_time=self.time,verbose=False)
+
+        mdot_fullgrain=self.regression_slots[-1].mdotfuel if self.regression_slots else 0.0
+        self.complex_total_fuel_mass_kg+=mdot_fullgrain*timestep
+        # Every slot is evenly spaced along the grain, so this arithmetic mean
+        # is the whole-grain, length-averaged radial regression rate for the
+        # current timestep.
+        average_regression_m_per_s=(
+            float(np.mean([slot.prev_regression for slot in self.regression_slots]))
+            if self.regression_slots else 0.0
+        )
+
+        # When complex regression is enabled, these are the values consumed by
+        # the motor model below (O/F, C*, chamber pressure, and thrust).  Do
+        # not let the independent single-port correlation overwrite them.
+        mean_port_area=(
+            float(np.mean([slot.area for slot in self.regression_slots]))
+            if self.regression_slots else 0.0
+        )
+        mean_port_perimeter=(
+            float(np.mean([slot.peremeter for slot in self.regression_slots]))
+            if self.regression_slots else 0.0
+        )
+        mean_total_regression=(
+            float(np.mean([slot.totalregression for slot in self.regression_slots]))
+            if self.regression_slots else 0.0
+        )
+        if usecomplexregression==True:
+            self.complex_mdot_fullgrain=mdot_fullgrain
+            self.complex_average_regression_m_per_s=average_regression_m_per_s
+            self.mdotfuel=mdot_fullgrain
+            self.totalmdot=mdot_fullgrain+massflowox
+            self.sum_modtfuel+=mdot_fullgrain*timestep
+            self.OF=massflowox/mdot_fullgrain if mdot_fullgrain>0 else np.inf
+            self.regression_M_persec=average_regression_m_per_s
+            self.regression_MM_persec=average_regression_m_per_s*1000.0
+            self.regression_M_persec_withratio=average_regression_m_per_s
+            self.regression_MM_persec_withratio=average_regression_m_per_s*1000.0
+            self.totalrgession=2.0*mean_total_regression
+            self.totalregression_MM=mean_total_regression*1000.0
+            self.area_grain=mean_port_area
+            self.portperimeter=mean_port_perimeter
+            self.diameter_grain=np.sqrt(4.0*mean_port_area/np.pi) if mean_port_area>0 else 0.0
+            self.fuelgrain_raduis=self.diameter_grain/2.0
+            self.hydrolicdiamter=self.diameter_grain
+            self.oxflux=massflowox/mean_port_area if mean_port_area>0 else 0.0
+            self.insurfacearea=mean_port_perimeter*FuelGrainLength*self.effectivelengthconstant
+            self.volume_grain=mean_port_area*FuelGrainLength
+
+        if Print_complex_regression:
+            for index, slot in enumerate(self.regression_slots):
+                self.complex_regression_history.append({
+                    "time_s": self.time,
+                    "slot_index": index,
+                    "distance_m": slot.distance,
+                    "area_m2": slot.area,
+                    "diameter_m": slot.Diameter,
+                    "perimeter_m": slot.peremeter,
+                    "regression_m_per_s": slot.prev_regression,
+                    "average_regression_m_per_s": average_regression_m_per_s,
+                    "total_regression_m": slot.totalregression,
+                    "total_flux_kg_m2_s": slot.totalflux,
+                    "fuel_flux_kg_m2_s": slot.fuelflux,
+                    "OF": slot.OF,
+                    "mdotfuel_kg_s": slot.mdotfuel,
+                    "mdot_from_fit": getattr(slot, "mdot_from_fit", 0.0),
+                    "mdot_fullgrain": mdot_fullgrain,
+                    "total_fuel_mass_kg": self.complex_total_fuel_mass_kg,
+                })
+        return self.regression_slots
+
+    def export_complex_regression_csv(self, filename="complex_regression.csv"):
+        """Write complex-regression slots to their own CSV, never output_thrust.csv."""
+        history=getattr(self, "complex_regression_history", [])
+        if history:
+            pd.DataFrame(history).to_csv(filename, index=False)
+
+    def iterate_regression(self, Timestep, Fuel_Density, FuelGrainLength):
+        """Backward-compatible placeholder for the former empty method."""
+        return getattr(self, "regression_slots", [])
     
         
         
@@ -1264,4 +1754,4 @@ class FuelGrain():
     #correct helix math
     # do the with or withou ratio for regression
     # look into x^m for regression
-    # explore if temp ncom realtionship
+# explore if temp ncom realtionship
