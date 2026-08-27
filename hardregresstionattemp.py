@@ -209,6 +209,7 @@ print(f'Paper_A: {A_paper}, prandtl_number_paper: {prandtl_number_paper}, paperP
 #harder regression attemp
 amount_of_slots=10
 amount_of_sections=amount_of_slots-1
+cstardevation=0.05
 
 
 @dataclass

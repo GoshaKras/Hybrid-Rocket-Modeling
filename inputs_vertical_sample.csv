@@ -47,7 +47,7 @@ WhatFuel,ABS,str
 TimeWhenBoostSops,4.75,s
 Is_fuelGrain_Helix,0,bool
 Is_FuelGrain_GoshaStar,0,bool
-Is_FuelGrain_PixelMethod,0,bool
+Is_FuelGrain_PixelMethod,1,bool
 Is_fuelgrain_Transient,1,bool
 Is_start_mass_gas_input,0,bool
 Is_vapourPhase_constant_temp,0,bool

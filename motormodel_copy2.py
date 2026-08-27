@@ -113,7 +113,7 @@ PlotAreaUnit = None
 
 # 3-D fuel-grain regression defaults. These remain available when vertical
 # inputs are enabled; add matching fields to the vertical CSV to override them.
-OBJ_FILE = "goshastar.obj"            # OBJ fuel-grain file in this folder
+OBJ_FILE = "hypertek stuff.obj"            # OBJ fuel-grain file in this folder
 # The named plane is high resolution; its normal is the lower-resolution
 # length direction. Example: "X" means a detailed Y-Z slice.
 HIGH_RESOLUTION_PLANE = "Y"            # "X", "Y", or "Z"
@@ -123,7 +123,7 @@ REGRESSION_RATE_MM_PER_S = 1.0          # Normal fuel regression rate used to bu
 SIMULATION_TIME_S = 50.0                # Total regression time used to build fits
 SLIDER_STEPS = 11                       # Standalone viewer setting; motor fits use graph points below
 DISPLAY_LENGTH_UNIT = "mm"              # "mm", "cm", "m", or "in" for plots/viewer labels
-OPEN_INTERACTIVE_VIEWER = False         # Open the X/Y/Z interactive viewer after calculation
+OPEN_INTERACTIVE_VIEWER = True         # Open the X/Y/Z interactive viewer after calculation
 SMOOTH_VIEWER_RENDERING = False         # Smooth displayed slice edges; does not alter calculations
 SHOW_PLANE_PREVIEW = True               # Show plane picker before the long rasterization
 SAVE_SELECTED_PLANE_ANALYSIS = True     # Generate selected-plane CSV plus curve-fit plots
@@ -133,7 +133,7 @@ SELECTED_PLANE_CURVE_FITS_CSV = "selected_plane_curve_fits.csv" # Piecewise-fit 
 SAVE_SELECTED_PLANE_ANALYSIS_PLOT = True  # Write curve-fit PNG files to disk
 SHOW_SELECTED_PLANE_ANALYSIS_AFTER_VIEWER = True  # Open curve-fit windows after slider closes
 SHOW_CURVE_FIT_EQUATIONS_ON_PLOTS = False  # Show equations in graph panels; CSV always includes them
-SELECTED_PLANE_GRAPH_POINTS = 50        # Regression samples used for selected-plane curves/fits
+SELECTED_PLANE_GRAPH_POINTS = 100        # Regression samples used for selected-plane curves/fits
 STOP_SELECTED_PLANE_GRAPHS_WHEN_FUEL_IS_GONE = True  # Stop graph/fit at first empty selected-plane slice
 OUTPUT_FOLDER = "regression_outputs"    # Folder for generated CSV and PNG files
 EXPORT_REGRESSED_SNAPSHOT_MM = None     # Set (for example) 25.0 to export remaining fuel as OBJ
@@ -143,12 +143,12 @@ UNIT_SCALE_MM = None                    # None = auto-detect; metres=1000, milli
 USE_VERTICAL_INPUTS = True # Set to True to load from vertical CSV, False to use hardcoded values
 VERTICAL_INPUTS_FILE = 'inputs_vertical_sample.csv'
 Exportinputs=False  # Set to True to export inputs to vertical CSV
-ShowPlots = False
+ShowPlots = True  # default: controls pixel-method plotting; may be overridden by vertical inputs
 # Vertical input files do not currently carry these optional complex-regression
 # controls, so keep that path disabled unless the flags are added explicitly.
 Do_complex_regression = False
 Print_complex_regression = False
-Use_cea_lookuptable = False
+Use_cea_lookuptable = True
 # Used only when Use_cea_lookuptable is True.  Vertical inputs may override it.
 TotalMaxExpectedChamberPressure_PSI = 1500.0
 
@@ -317,12 +317,17 @@ if True:
     Override_effectivelengthconstant=True
     Usepixel_calcs_SAV=True
     burntimecutoff=10
-    Do_complex_regression=True
-    Print_complex_regression=True
+    Do_complex_regression=False
+    Print_complex_regression=False
     Use_cea_lookuptable=True
     TotalMaxExpectedChamberPressure_PSI=1000.0
     Max_expected_pressure_psi=500
-    Use_complex_reg_values=True
+    Use_complex_reg_values=False
+    # Pixel geometry source: "three_d" uses the voxel model's whole-grain
+    # port volume and burning surface; "slice" uses slice area/perimeter
+    # multiplied by PIXEL_SLICE_LENGTH_M (None = FuelGrainLength).
+    PIXEL_GEOMETRY_MODE="three_d"
+    PIXEL_SLICE_LENGTH_M=None
     # Eq. 43 epsilon used for helix f_c and blowing-number calculations.
     # A vertical-input file can override this when it includes the same field.
     HELIX_FC_EPSILON = 100.0*10**-6
@@ -644,6 +649,34 @@ OxtankMath=Oxtank(RealTime,Oxtanktemp,NitrousQuality,StartMass_Gas,StartMass_Liq
 OxtankMath.StuffNoPrint(OxtankVolume, Timestep, oxtankLstart,hydroD=HydrolicDiameter,isventopen=isventopen)
 
 
+def print_mode_summary():
+    """Print the feature switches that control this motor run."""
+    state=lambda enabled: "ON" if enabled else "OFF"
+    complex_drives_motor=Do_complex_regression and Use_complex_reg_values
+    print("\n" + "=" * 58)
+    print("Motor model mode summary")
+    print("=" * 58)
+    print(f"Flight simulation:              {state(Is_sim_flight)}")
+    print(f"Transient chamber model:        {state(Is_fuelgrain_Transient)}")
+    print(f"Pixel fuel-grain method:        {state(Is_FuelGrain_PixelMethod)}")
+    if Is_FuelGrain_PixelMethod:
+        slice_length=(FuelGrainLength if PIXEL_SLICE_LENGTH_M is None else PIXEL_SLICE_LENGTH_M)
+        print(f"  Pixel geometry source:        {PIXEL_GEOMETRY_MODE} (slice length {slice_length:g} m)")
+        print(f"  3-D plane picker:             {state(ShowPlots and SHOW_PLANE_PREVIEW)}")
+        print(f"  Interactive slider viewer:    {state(ShowPlots and OPEN_INTERACTIVE_VIEWER)}")
+    print(f"Helix geometry:                 {state(Is_fuelGrain_Helix)}")
+    print(f"  Whole-grain helix:            {state(Is_fuelGrain_Helix and Whole_thing_helix)}")
+    print(f"Gosha-star geometry:            {state(Is_FuelGrain_GoshaStar)}")
+    print(f"Complex regression:             {state(Do_complex_regression)}")
+    if Do_complex_regression:
+        print(f"  Complex values drive motor:   {state(complex_drives_motor)}")
+        print(f"  CEA lookup table:             {state(Use_cea_lookuptable)}")
+    print(f"Easy nozzle regression:         {state(Is_easy_nozzle_regression)}")
+    print("=" * 58 + "\n")
+
+print_mode_summary()
+
+
 
 FuelGrainMath=FuelGrain(FuelGrainDiameter,fuelGrain_AreaReal,FuelGrainLength,start_chamber_pressure_pa,start_chamber_temperature_k,HowmuchInj_Help,Is_fuelGrain_Helix,helixrundiameter,Is_fuelgrain_Transient,Is_start_mass_gas_input,StartMass_Gas,Is_FuelGrain_GoshaStar,OneArchlengthestimate,preccandpostvolume,start_gas_gpermole,RealTime,Is_FuelGrain_PixelMethod,helixloopdiameter=helixloopdiameter,plot_length_unit=PlotLengthUnit,plot_area_unit=PlotAreaUnit,effectivelengthconstant=effectivelengthconstant)
 FuelGrainMath.stuffnoprint(Is_FuelGrain_PixelMethod,outerdiameter_inches=OuterDiameter_inches,totalComplexArea=TotalComplexArea,Is_fuelGrain_Helix=Is_fuelGrain_Helix,revPitch=revPitch,PitchFor_Helix=PitchFor_Helix,Usepixel_calcs_SAV=Usepixel_calcs_SAV)
@@ -657,41 +690,43 @@ if Is_FuelGrain_GoshaStar==True:
 if Is_sim_flight==True: #fix later
     flighmath=Flight(wetmass,drymass,rocketareaM,startingoutsidetempC,PressureOutsidePa,TempchangePerMeter,realativehumidity,dragcoIfnotcdchart,df_cdinput,drouge_cd,drouge_area,infaltionint,infaltiontime,main_cd,main_area,maindelpyalt,Timestep,RealTime)
     flighmath.stuffnotprint(rocketareaM)
-    if Is_FuelGrain_PixelMethod==True:
-        print(f"Fuel-grain regression plots {'will show' if ShowPlots else 'will not show'}.")
-        print(f"  Plane picker: {'on' if ShowPlots and SHOW_PLANE_PREVIEW else 'off'}; "
-              f"slider viewer: {'on' if ShowPlots and OPEN_INTERACTIVE_VIEWER else 'off'}.")
-        # Run full regression analysis with all graphs (controlled by ShowPlots)
-        # Keep the shared 3-D regression module's output/plot behaviour in
-        # sync with the settings above when the motor model requests plots.
-        import attempyforfgreg as regression_3d
-        regression_3d.SAVE_SELECTED_PLANE_ANALYSIS = SAVE_SELECTED_PLANE_ANALYSIS
-        regression_3d.SAVE_SELECTED_PLANE_ANALYSIS_PLOT = SAVE_SELECTED_PLANE_ANALYSIS_PLOT
-        regression_3d.SHOW_SELECTED_PLANE_ANALYSIS_AFTER_VIEWER = SHOW_SELECTED_PLANE_ANALYSIS_AFTER_VIEWER
-        regression_3d.SHOW_CURVE_FIT_EQUATIONS_ON_PLOTS = SHOW_CURVE_FIT_EQUATIONS_ON_PLOTS
-        regression_3d.STOP_SELECTED_PLANE_GRAPHS_WHEN_FUEL_IS_GONE = STOP_SELECTED_PLANE_GRAPHS_WHEN_FUEL_IS_GONE
-        regression_3d.OUTPUT_FOLDER = OUTPUT_FOLDER
-        regression_3d.SMOOTH_VIEWER_RENDERING = SMOOTH_VIEWER_RENDERING
-        plane_name = HIGH_RESOLUTION_PLANE.strip().upper()
-        if plane_name not in ("X", "Y", "Z"):
-            raise ValueError("HIGH_RESOLUTION_PLANE must be X, Y, or Z")
-        FuelGrainMath.run_regression_analysis(
-            OBJ_FILE,
-            regression_rate=REGRESSION_RATE_MM_PER_S,
-            time_seconds=SIMULATION_TIME_S,
-            cross_section_axis=("X", "Y", "Z").index(plane_name),
-            show_plots=ShowPlots,
-            plot_length_unit=DISPLAY_LENGTH_UNIT,
-            plot_area_unit=PlotAreaUnit,
-            in_plane_resolution=IN_PLANE_RESOLUTION,
-            length_resolution=LENGTH_RESOLUTION,
-            unit_scale_mm=UNIT_SCALE_MM,
-            graph_points=SELECTED_PLANE_GRAPH_POINTS,
-            snapshot_regression_mm=EXPORT_REGRESSED_SNAPSHOT_MM,
-            snapshot_path=f"{OUTPUT_FOLDER}/{REGRESSED_SNAPSHOT_FILENAME}",
-            show_plane_preview=SHOW_PLANE_PREVIEW,
-            open_interactive_viewer=OPEN_INTERACTIVE_VIEWER,
-        )
+
+# Pixel-method analysis and viewer are independent of flight simulation.
+if Is_FuelGrain_PixelMethod==True:
+    print(f"Fuel-grain regression plots {'will show' if ShowPlots else 'will not show'}.")
+    print(f"  Plane picker: {'on' if ShowPlots and SHOW_PLANE_PREVIEW else 'off'}; "
+          f"slider viewer: {'on' if ShowPlots and OPEN_INTERACTIVE_VIEWER else 'off'}.")
+    # Run full regression analysis with all graphs (controlled by ShowPlots)
+    # Keep the shared 3-D regression module's output/plot behaviour in
+    # sync with the settings above when the motor model requests plots.
+    import attempyforfgreg as regression_3d
+    regression_3d.SAVE_SELECTED_PLANE_ANALYSIS = SAVE_SELECTED_PLANE_ANALYSIS
+    regression_3d.SAVE_SELECTED_PLANE_ANALYSIS_PLOT = SAVE_SELECTED_PLANE_ANALYSIS_PLOT
+    regression_3d.SHOW_SELECTED_PLANE_ANALYSIS_AFTER_VIEWER = SHOW_SELECTED_PLANE_ANALYSIS_AFTER_VIEWER
+    regression_3d.SHOW_CURVE_FIT_EQUATIONS_ON_PLOTS = SHOW_CURVE_FIT_EQUATIONS_ON_PLOTS
+    regression_3d.STOP_SELECTED_PLANE_GRAPHS_WHEN_FUEL_IS_GONE = STOP_SELECTED_PLANE_GRAPHS_WHEN_FUEL_IS_GONE
+    regression_3d.OUTPUT_FOLDER = OUTPUT_FOLDER
+    regression_3d.SMOOTH_VIEWER_RENDERING = SMOOTH_VIEWER_RENDERING
+    plane_name = HIGH_RESOLUTION_PLANE.strip().upper()
+    if plane_name not in ("X", "Y", "Z"):
+        raise ValueError("HIGH_RESOLUTION_PLANE must be X, Y, or Z")
+    FuelGrainMath.run_regression_analysis(
+        OBJ_FILE,
+        regression_rate=REGRESSION_RATE_MM_PER_S,
+        time_seconds=SIMULATION_TIME_S,
+        cross_section_axis=("X", "Y", "Z").index(plane_name),
+        show_plots=ShowPlots,
+        plot_length_unit=DISPLAY_LENGTH_UNIT,
+        plot_area_unit=PlotAreaUnit,
+        in_plane_resolution=IN_PLANE_RESOLUTION,
+        length_resolution=LENGTH_RESOLUTION,
+        unit_scale_mm=UNIT_SCALE_MM,
+        graph_points=SELECTED_PLANE_GRAPH_POINTS,
+        snapshot_regression_mm=EXPORT_REGRESSED_SNAPSHOT_MM,
+        snapshot_path=f"{OUTPUT_FOLDER}/{REGRESSED_SNAPSHOT_FILENAME}",
+        show_plane_preview=SHOW_PLANE_PREVIEW,
+        open_interactive_viewer=OPEN_INTERACTIVE_VIEWER,
+    )
 
 
 
@@ -755,9 +790,16 @@ try:
         #OxtankMath.heattransferoxtank(oxtankID,oxtanksurfaceareainput,oxtankmass,oxtankspecheat,Timestep)
         OxtankMath.Calc_CD(chamberpressure_PA=FuelGrainMath.chamberpressure_PA)
         if Is_FuelGrain_PixelMethod==True:
-            FuelGrainMath.pixelmethodgeo(Is_fuelGrain_Helix=Is_fuelGrain_Helix,FuelGrainLength=FuelGrainLength,Fuel_Density=Fuel_Density,Timestep=Timestep,amountofsmallcircles=AmountofSmallCircles,Override_effectivelengthconstant=Override_effectivelengthconstant,effectivelengthconstant=effectivelengthconstant )
-        FuelGrainMath.oxflux_func(OxtankMath.RealMassFlowRate,RealTime)
-        FuelGrainMath.regression_func(OxtankMath.status,Regression_Aco,Regression_Nco,regfluxstuff,Timestep)
+            FuelGrainMath.pixelmethodgeo(Is_fuelGrain_Helix=Is_fuelGrain_Helix,FuelGrainLength=FuelGrainLength,Fuel_Density=Fuel_Density,Timestep=Timestep,amountofsmallcircles=AmountofSmallCircles,Override_effectivelengthconstant=Override_effectivelengthconstant,effectivelengthconstant=effectivelengthconstant,pixel_geometry_mode=PIXEL_GEOMETRY_MODE,slice_length_m=PIXEL_SLICE_LENGTH_M)
+        # Complex regression can either be a comparison/export calculation or
+        # the model that drives the motor.  Only calculate the ordinary
+        # single-port correlation when its results will be used.
+        complex_values_drive_motor=(Do_complex_regression and Use_complex_reg_values)
+        if complex_values_drive_motor:
+            FuelGrainMath.time=RealTime
+        else:
+            FuelGrainMath.oxflux_func(OxtankMath.RealMassFlowRate,RealTime)
+            FuelGrainMath.regression_func(OxtankMath.status,Regression_Aco,Regression_Nco,regfluxstuff,Timestep)
         if Do_complex_regression:
             FuelGrainMath.complexregression(
                 CEAforRocket, Fuel_Density, FuelGrainLength,
@@ -772,7 +814,7 @@ try:
                 cea_lookup_pressure_range_psi=(0.0, TotalMaxExpectedChamberPressure_PSI)
             )
         
-        if not (Do_complex_regression and Use_complex_reg_values):
+        if not complex_values_drive_motor:
             FuelGrainMath.simpleCircleGeo(FuelGrainLength,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix)
             FuelGrainMath.masses_of_stuff(Fuel_Density, OxtankMath,Timestep,FuelGrainLength=FuelGrainLength)
         FuelGrainMath.Ox_Fuel_Ratio(OxtankMath.RealMassFlowRate)

@@ -44,7 +44,7 @@ if not hasattr(ResizeEvent, "inaxes"):
 # =============================================================================
 # USER SETTINGS — change these values, then press Run in your IDE.
 # =============================================================================
-OBJ_FILE = "circlehellixed.obj"       # OBJ fuel-grain file in this folder
+OBJ_FILE = "hypertek stuff.obj"       # OBJ fuel-grain file in this folder
 # The named plane is the high-resolution cross-section; its normal is the
 # lower-resolution length direction. Example: "X" means a detailed Y-Z slice.
 HIGH_RESOLUTION_PLANE = "X"            # "X", "Y", or "Z"
@@ -604,11 +604,19 @@ def polynomial_equation(poly: np.poly1d, variable: str = "r") -> str:
 
 def piecewise_polynomial_fit(x: np.ndarray, y: np.ndarray, burnthrough_index: int | None):
     """Fit separate curves before and after selected-plane burn-through."""
-    if burnthrough_index is None or burnthrough_index < 2 or len(x) - burnthrough_index < 3:
+    if burnthrough_index is None or burnthrough_index < 3:
         poly, degree, r_squared = polynomial_fit(x, y)
         return [("all regression", x, poly, degree, r_squared)]
-    return [("before burn-through", x[:burnthrough_index + 1], *polynomial_fit(x[:burnthrough_index + 1], y[:burnthrough_index + 1])),
-            ("after burn-through", x[burnthrough_index:], *polynomial_fit(x[burnthrough_index:], y[burnthrough_index:]))]
+
+    # The burn-through sample is the first point where this plane has no fuel.
+    # It belongs to neither the intact-fuel fit nor its extrapolation, so do
+    # not include it in the "before burn-through" curve.
+    branches=[("before burn-through", x[:burnthrough_index],
+               *polynomial_fit(x[:burnthrough_index], y[:burnthrough_index]))]
+    if len(x) - burnthrough_index >= 3:
+        branches.append(("after burn-through", x[burnthrough_index:],
+                         *polynomial_fit(x[burnthrough_index:], y[burnthrough_index:])))
+    return branches
 
 
 def save_picked_plane_analysis(rows: list[dict[str, float]], axis: int, path: Path | None,

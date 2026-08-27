@@ -154,6 +154,11 @@ class FuelGrain():
         self.initial_surface_area=None
         self.intail_surface_area=None
         self.surface_area_coeffs=None
+        self.port_volume_coeffs=None
+        # Retained only for optional diagnostics; runtime geometry is evaluated
+        # from the selected polynomial equations.
+        self._pixel_geometry_samples=None
+        self._previous_pixel_port_volume_m3=None
         self.BlowingCo=0
         self.use_blowingco=0
         self.prandtl_number=None
@@ -486,12 +491,14 @@ class FuelGrain():
             self.insurfacearea=self.complexcircum*FuelGrainLength*self.effectivelengthconstant
         if self.Is_pixel==True:
             self.area_grain=self.pixelAREA
-            self.insurfacearea=self.P_perimeter*FuelGrainLength*self.effectivelengthconstant
+            if getattr(self, "pixel_geometry_mode", "slice") == "slice":
+                self.insurfacearea=self.P_perimeter*self.pixel_geometry_length_m
         if Is_fuelGrain_Helix==True:
             self.surfaceareaadd=0
             self.addtoarea_bcHelix=0
                          
-        self.volume_grain=self.area_grain*FuelGrainLength
+        if not (self.Is_pixel and getattr(self, "pixel_geometry_mode", "slice") == "three_d"):
+            self.volume_grain=self.area_grain*FuelGrainLength
     def _store_initial_surface_area(self, surface_area_m2=None):
         """Store the initial inner surface area in both spelling variants for downstream use."""
         if surface_area_m2 is None:
@@ -514,11 +521,20 @@ class FuelGrain():
     # Uses coefficients loaded by run_regression_analysis(), which currently
     # delegates to the active 3-D attempyforfgreg implementation below.
     # =========================================================================
-    def pixelmethodgeo(self,Is_fuelGrain_Helix,FuelGrainLength,Fuel_Density,Timestep,amountofsmallcircles,effectivelengthconstant,Override_effectivelengthconstant):
+    def pixelmethodgeo(self,Is_fuelGrain_Helix,FuelGrainLength,Fuel_Density,Timestep,amountofsmallcircles,effectivelengthconstant,Override_effectivelengthconstant,pixel_geometry_mode="slice",slice_length_m=None):
         """
         Calculate pixel method geometry using polynomial curve fits from regression analysis.
         Uses 2nd-degree polynomial fits for area and perimeter extracted from the OBJ geometry.
         """
+        if pixel_geometry_mode not in ("slice", "three_d"):
+            raise ValueError("pixel_geometry_mode must be 'slice' or 'three_d'")
+        self.pixel_geometry_mode=pixel_geometry_mode
+        self.pixel_geometry_length_m=(
+            FuelGrainLength if slice_length_m is None else float(slice_length_m)
+        )
+        if self.pixel_geometry_length_m <= 0:
+            raise ValueError("slice_length_m must be positive")
+
         # Get current regression distance in mm
         regression_distance_mm = self.totalregression_MM
         
@@ -562,8 +578,10 @@ class FuelGrain():
         x = regression_distance_mm
         
         # Area calculation (mm²) from polynomial fit - uses np.polyval for variable degree
-        self.pixelAREA = np.polyval(area_coeffs, x)
-        self.pixelAREA = max(0, self.pixelAREA)  # Ensure non-negative
+        # Evaluate the selected area equation.  The 3-D analysis chooses the
+        # lowest suitable degree (2--5), rather than always forcing degree 5.
+        area_mm2=float(np.polyval(area_coeffs, x))
+        self.pixelAREA=max(0.0, area_mm2)
         self.pixelAREA=self.pixelAREA/(1000*1000)  # Subtract from initial area based on OD
       
         if self.time>Timestep:
@@ -584,9 +602,16 @@ class FuelGrain():
             self.effectivelengthconstant=self.initial_surface_area/(self.P_perimeter*FuelGrainLength)
             self.P_surfacearea=self.initial_surface_area
         else:
-            self.P_surfacearea=self.P_perimeter*FuelGrainLength
+            self.P_surfacearea=self.P_perimeter*self.pixel_geometry_length_m
         if Override_effectivelengthconstant==True:
             self.effectivelengthconstant=effectivelengthconstant
+        if pixel_geometry_mode == "three_d" and self.surface_area_coeffs is not None and self.port_volume_coeffs is not None:
+            surface_area_mm2=float(np.polyval(self.surface_area_coeffs, x))
+            port_volume_mm3=float(np.polyval(self.port_volume_coeffs, x))
+            self.P_surfacearea=max(0.0, surface_area_mm2) / 1_000_000.0
+            self.volume_grain=max(0.0, port_volume_mm3) / 1_000_000_000.0
+        else:
+            self.volume_grain=self.pixelAREA*self.pixel_geometry_length_m
         self.insurfacearea=self.P_surfacearea
         if self.initial_surface_area is None:
             self._store_initial_surface_area(self.P_surfacearea)
@@ -621,8 +646,19 @@ class FuelGrain():
             self.P_largest_arm_contact=0
         
         self.Howcircle=1/(self.P_eqPerimeter/self.P_perimeter)
-        if self.time>=Timestep:
-            self.p_mdotfuel=((self.pixelAREA-self.oldarea)*Fuel_Density*FuelGrainLength*self.effectivelengthconstant)/Timestep
+        # Fuel generation comes from the derivative of the active geometry
+        # equation, evaluated at the current regression distance.  The fitted
+        # independent variable is mm, so convert mm^2/s or mm^3/s to SI.
+        regression_rate_mm_s=self.regression_MM_persec_withratio
+        if regression_rate_mm_s is not None:
+            if pixel_geometry_mode == "slice":
+                darea_dr_mm2_per_mm=float(np.polyval(np.polyder(area_coeffs), x))
+                darea_dt_m2_per_s=darea_dr_mm2_per_mm*regression_rate_mm_s/1_000_000.0
+                self.p_mdotfuel=darea_dt_m2_per_s*self.pixel_geometry_length_m*Fuel_Density
+            elif self.port_volume_coeffs is not None:
+                dvolume_dr_mm3_per_mm=float(np.polyval(np.polyder(self.port_volume_coeffs), x))
+                dvolume_dt_m3_per_s=dvolume_dr_mm3_per_mm*regression_rate_mm_s/1_000_000_000.0
+                self.p_mdotfuel=dvolume_dt_m3_per_s*Fuel_Density
         self.oldsurfacearea=self.P_surfacearea
         self.oldarea=self.pixelAREA
         self.oldpixelcircum=self.P_perimeter
@@ -816,23 +852,59 @@ class FuelGrain():
         )
         x = distances
 
-        def fit_metric(rows, key):
-            values = np.asarray([row[key] for row in rows], dtype=float)
-            degree = min(5, len(x) - 1)
-            return np.polyfit(x, values, degree)
+        # Match the selected-plane curve-fit logic: fit only the intact-fuel
+        # points.  Including the burn-through point and its later flat values
+        # forces a higher-degree polynomial and can make the port-area equation
+        # bend downward near zero regression.
+        plane_burnthrough_indices=np.flatnonzero(np.asarray(
+            [row["burnthrough"] for row in plane_rows], dtype=bool
+        ))
+        if len(plane_burnthrough_indices):
+            plane_fit_rows=plane_rows[:int(plane_burnthrough_indices[0])]
+        else:
+            plane_fit_rows=plane_rows
 
-        self.area_coeffs = fit_metric(plane_rows, "port_area_mm2")
-        self.perimeter_coeffs = fit_metric(plane_rows, "port_perimeter_mm")
-        self.max_inscribed_coeffs = fit_metric(plane_rows, "max_inscribed_diameter_mm")
-        self.min_enclosing_coeffs = fit_metric(plane_rows, "min_enclosing_diameter_mm")
-        self.circle_overlap_coeffs = fit_metric(plane_rows, "circle_boundary_overlap_mm")
-        self.largest_arm_coeffs = fit_metric(plane_rows, "largest_arm_contact_mm")
-        self.surface_area_coeffs = fit_metric(surface_rows, "burning_surface_area_mm2")
+        # Whole-grain port volume becomes flat after all fuel is gone.  Those
+        # post-exhaustion samples are useful for plots, but must not be part of
+        # the operating geometry equation: they distort its derivative and can
+        # produce negative dV/dr at the start of the burn.
+        whole_grain_exhaustion_indices=np.flatnonzero(np.asarray(
+            [row["remaining_fuel_volume_mm3"] <= 0.0 for row in surface_rows], dtype=bool
+        ))
+        if len(whole_grain_exhaustion_indices) and int(whole_grain_exhaustion_indices[0]) >= 3:
+            whole_grain_fit_rows=surface_rows[:int(whole_grain_exhaustion_indices[0])]
+        else:
+            whole_grain_fit_rows=surface_rows
+
+        selected_fit_degrees={}
+
+        def fit_metric(rows, key):
+            fit_x=np.asarray([row["regression_mm"] for row in rows], dtype=float)
+            values = np.asarray([row[key] for row in rows], dtype=float)
+            polynomial, degree, _ = regression_3d.polynomial_fit(fit_x, values)
+            selected_fit_degrees[key]=degree
+            return polynomial.c
+
+        self.area_coeffs = fit_metric(plane_fit_rows, "port_area_mm2")
+        self.perimeter_coeffs = fit_metric(plane_fit_rows, "port_perimeter_mm")
+        self.max_inscribed_coeffs = fit_metric(plane_fit_rows, "max_inscribed_diameter_mm")
+        self.min_enclosing_coeffs = fit_metric(plane_fit_rows, "min_enclosing_diameter_mm")
+        self.circle_overlap_coeffs = fit_metric(plane_fit_rows, "circle_boundary_overlap_mm")
+        self.largest_arm_coeffs = fit_metric(plane_fit_rows, "largest_arm_contact_mm")
+        self.surface_area_coeffs = fit_metric(whole_grain_fit_rows, "burning_surface_area_mm2")
+        self.port_volume_coeffs = fit_metric(whole_grain_fit_rows, "port_volume_mm3")
+        self._previous_pixel_port_volume_m3=None
         self._store_initial_surface_area(float(surface_rows[0]["burning_surface_area_mm2"]) / 1_000_000.0)
 
         print("3-D regression geometry loaded into FuelGrain:")
         print(f"  plane: {('X', 'Y', 'Z')[cross_section_axis]}; grid: {tuple(solid.shape)}")
         print(f"  fitted range: 0 to {max_regression_mm:.3f} mm")
+        if len(whole_grain_exhaustion_indices):
+            print("  whole-grain geometry fit ends before fuel exhaustion at "
+                  f"{surface_rows[int(whole_grain_exhaustion_indices[0])]['regression_mm']:.3f} mm")
+        print("  selected polynomial degrees: " + ", ".join(
+            f"{key}={degree}" for key, degree in selected_fit_degrees.items()
+        ))
         if show_plots:
             display_unit, display_scale = regression_3d.display_unit_scale(
                 self.plot_length_unit if plot_length_unit is None else plot_length_unit
@@ -858,7 +930,7 @@ class FuelGrain():
         if self.Is_pixel==True :
             # If it's the first time step, calculate the mass flow rate
             if self.time==Timestep:
-                self.mdotfuel=(self.P_perimeter+self.oldpixelcircum)*Fuel_Density*FuelGrainLength*self.regression_M_persec_withratio*0.5
+                self.mdotfuel=self.insurfacearea*Fuel_Density*self.regression_M_persec_withratio
             else:
                 self.mdotfuel=self.p_mdotfuel
             #self.oldpixelcircum=self.P_perimeter
@@ -1167,7 +1239,7 @@ class FuelGrain():
             self.volumeflowrate2=self.volume_grain-self.oldvolumegrain
             self.oldvolumegrain=self.volume_grain
             self.massGas=self.massGas+(self.mdotgain*Timestep)
-            self.deltaPressure_PA=self.newchamberpressure_PA*((self.mdotgain/self.massGas)-(self.volumeflowrate/self.volume_grain)+(self.delatTemp/self.chamber_temp)+(self.deltaSpecR/self.SpecR))
+            self.deltaPressure_PA=self.newchamberpressure_PA*((self.mdotgain/self.massGas)-(self.volumeflowrate/self.volume_grain))#+(self.delatTemp/self.chamber_temp)+(self.deltaSpecR/self.SpecR))
             self.newchamberpressure_PA=self.newchamberpressure_PA+self.deltaPressure_PA*Timestep
             self.newchamberpressure_psi=self.newchamberpressure_PA/6894.76
             self.sum_mdot=self.sum_mdot+(self.mdotnozzle*Timestep)
