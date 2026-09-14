@@ -1,0 +1,7 @@
+Fitted polynomial (regression*perimeter) in x:
+-0.146082*x**5 + 0.159844*x**4 + -0.0607206*x**3 + 0.00890972*x**2 + -0.000210815*x + 0.000103687
+
+Analytical integral (indefinite):
+-0.0243469*x**6 + 0.0319689*x**5 + -0.0151801*x**4 + 0.00296991*x**3 + -0.000105407*x**2 + 0.000103687*x + 0 + C
+
+Total definite integral over fit range: 5.3553008301009064e-05

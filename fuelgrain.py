@@ -21,6 +21,7 @@ from skimage import measure
 import trimesh
 from scipy import ndimage
 import attempyforfgreg as regression_3d
+import surfacearea
 
 
 @dataclass
@@ -37,6 +38,7 @@ class RegressionSlot:
     mdotfuel: float = 0.0
     Nominal_port_D: float = 0.0
     Helix_loop_d: float = 0.0
+    surfacearea: float = 0.0
 
 
 class CEALookupTable:
@@ -144,6 +146,7 @@ class FuelGrain():
         self.time=RealTime
         self.diameter_grain=FuelGrainDiameter
         self.area_grain=fuelGrain_AreaReal
+        self.fuel_grain_length_m=float(FuelGrainLength)
         self.fuelgrain_raduis=self.diameter_grain/2
         self.insurfacearea=None
         self.regression_M_persec=0
@@ -233,6 +236,7 @@ class FuelGrain():
             self.volumeflowrate=None
             self.volumeflowrate2=None
             self.oldvolumegrain=self.area_grain*FuelGrainLength+preccandpostvolume
+            self.extra_volume=preccandpostvolume
             self.massGas=((self.oldvolumegrain*self.newchamberpressure_PA)/(8.314*start_chamber_temperature_k))*start_gas_gpermole/1000
             if Is_start_mass_gas_input==True:
                 self.massGas=StartMass_Gas
@@ -597,14 +601,8 @@ class FuelGrain():
         self.P_perimeter = np.polyval(perimeter_coeffs, x)
         self.P_perimeter = max(0, self.P_perimeter)
         self.P_perimeter=self.P_perimeter/1000  # Ensure non-negative
-        if self.time==Timestep and self.Is_helix==True:
-            
-            self.effectivelengthconstant=self.initial_surface_area/(self.P_perimeter*FuelGrainLength)
-            self.P_surfacearea=self.initial_surface_area
-        else:
-            self.P_surfacearea=self.P_perimeter*self.pixel_geometry_length_m
-        if Override_effectivelengthconstant==True:
-            self.effectivelengthconstant=effectivelengthconstant
+        
+        self.effectivelengthconstant=effectivelengthconstant
         if pixel_geometry_mode == "three_d" and self.surface_area_coeffs is not None and self.port_volume_coeffs is not None:
             surface_area_mm2=float(np.polyval(self.surface_area_coeffs, x))
             port_volume_mm3=float(np.polyval(self.port_volume_coeffs, x))
@@ -615,7 +613,8 @@ class FuelGrain():
         self.insurfacearea=self.P_surfacearea
         if self.initial_surface_area is None:
             self._store_initial_surface_area(self.P_surfacearea)
-        
+        self.volume_grain=self.volume_grain*self.effectivelengthconstant
+        self.insurfacearea=self.insurfacearea*self.effectivelengthconstant
         # Max inscribed circle diameter calculation (mm) from polynomial fit - uses np.polyval for variable degree
         self.P_max_inscribed_diameter = np.polyval(max_inscribed_coeffs, x)
         self.P_max_inscribed_diameter = max(0, self.P_max_inscribed_diameter)
@@ -834,7 +833,8 @@ class FuelGrain():
             solid, pitch = regression_3d.make_solid_voxels(
                 mesh, cross_section_axis, in_plane_resolution, length_resolution
             )
-        initial_port = regression_3d.central_port_mask(solid, cross_section_axis)
+        with regression_3d.activity_indicator("Identifying the central port..."):
+            initial_port = regression_3d.central_port_mask(solid, cross_section_axis)
         if snapshot_regression_mm is not None:
             regression_3d.export_regressed_fuel_snapshot(
                 solid, initial_port, pitch, float(snapshot_regression_mm),
@@ -842,13 +842,20 @@ class FuelGrain():
             )
         max_regression_mm = regression_rate * time_seconds
         distances = np.linspace(0.0, max_regression_mm, graph_points)
-        plane_rows = regression_3d.picked_plane_regression(
-            solid, initial_port, pitch, cross_section_axis, distances
-        )
+        with regression_3d.activity_indicator("Measuring the initial OBJ bore surface..."):
+            initial_bore_area=regression_3d.mesh_bore_surface_area(mesh, cross_section_axis)
         surface_rows = regression_3d.regression_table(
             solid, initial_port, pitch, cross_section_axis, distances,
             mesh_volume=float("nan"), mesh_area=float(mesh.area),
-            initial_bore_area=regression_3d.mesh_bore_surface_area(mesh, cross_section_axis),
+            initial_bore_area=initial_bore_area,
+            use_triangulated_bore_surface_area=(
+                regression_3d.USE_TRIANGULATED_BORE_SURFACE_AREA
+            ),
+        )
+        plane_rows = regression_3d.picked_plane_regression(
+            solid, initial_port, pitch, cross_section_axis, distances,
+            surface_area_rows=surface_rows,
+            surface_area_ratio_grain_length_mm=self.fuel_grain_length_m*1000.0,
         )
         x = distances
 
@@ -925,17 +932,14 @@ class FuelGrain():
         return self.run_regression_analysis_3d(*args, **kwargs)
 
     def masses_of_stuff(self, Fuel_Density, OxtankMath,Timestep, FuelGrainLength):
-        
-        #self.mdotfuel=self.insurfacearea2*self.regression_M_persec*Fuel_Density#*self.flowrateRatio_Use
-        if self.Is_pixel==True :
-            # If it's the first time step, calculate the mass flow rate
-            if self.time==Timestep:
-                self.mdotfuel=self.insurfacearea*Fuel_Density*self.regression_M_persec_withratio
-            else:
-                self.mdotfuel=self.p_mdotfuel
-            #self.oldpixelcircum=self.P_perimeter
-        else:
-            self.mdotfuel=self.insurfacearea*Fuel_Density*self.regression_M_persec_withratio
+        # Fuel mass generation is the bore surface area swept by the radial
+        # regression rate: mdot_fuel = A_bore * r_dot * rho_fuel.  Use this
+        # consistently for pixel and analytic grain geometries.
+        self.mdotfuel=(
+            self.insurfacearea
+            * self.regression_M_persec_withratio
+            * Fuel_Density
+        )
         self.sum_modtfuel=self.sum_modtfuel+(self.mdotfuel*Timestep)
         
 
@@ -1238,8 +1242,9 @@ class FuelGrain():
             self.volumeflowrate=((self.mdotfuel)/Fuel_Density)
             self.volumeflowrate2=self.volume_grain-self.oldvolumegrain
             self.oldvolumegrain=self.volume_grain
+            self.chambervolume=self.volume_grain+self.extra_volume
             self.massGas=self.massGas+(self.mdotgain*Timestep)
-            self.deltaPressure_PA=self.newchamberpressure_PA*((self.mdotgain/self.massGas)-(self.volumeflowrate/self.volume_grain))#+(self.delatTemp/self.chamber_temp)+(self.deltaSpecR/self.SpecR))
+            self.deltaPressure_PA=self.newchamberpressure_PA*((self.mdotgain/self.massGas)-(self.volumeflowrate/self.chambervolume))#+(self.delatTemp/self.chamber_temp)+(self.deltaSpecR/self.SpecR))
             self.newchamberpressure_PA=self.newchamberpressure_PA+self.deltaPressure_PA*Timestep
             self.newchamberpressure_psi=self.newchamberpressure_PA/6894.76
             self.sum_mdot=self.sum_mdot+(self.mdotnozzle*Timestep)
@@ -1256,7 +1261,8 @@ class FuelGrain():
                           cea_lookup_of_range=(0.0, 30.0),
                           cea_lookup_pressure_points=31,
                           cea_lookup_of_points=61,
-                          usecomplexregression=False):
+                          usecomplexregression=False,
+                          use_pixel_geometry=None):
         """Near-verbatim port of hardregresstionattemp.py from line 214.
 
         Variable names and the original calculation order are intentionally
@@ -1271,6 +1277,35 @@ class FuelGrain():
         startreg=0.0
         lengthinFG=FuelGrainLength
         portD=self.diameter_grain
+        # The pixel method supplies selected-plane area/perimeter equations as
+        # functions of radial regression.  Complex regression has independent
+        # axial slots, so evaluate that same cross-section for each slot's own
+        # local regression distance.
+        # None preserves automatic selection for existing callers. An explicit
+        # False selects the built-in circular formulas even in pixel mode.
+        use_pixel_slot_geometry=(
+            self.Is_pixel if use_pixel_geometry is None else use_pixel_geometry
+        )
+        if use_pixel_slot_geometry and (
+            self.area_coeffs is None or self.perimeter_coeffs is None
+        ):
+            raise RuntimeError(
+                "Pixel complex regression requires pixel geometry coefficients. "
+                "Run run_regression_analysis() before complexregression()."
+            )
+
+        def pixel_slot_geometry(regression_m):
+            regression_mm=regression_m*1000.0
+            area_m2=max(0.0, float(np.polyval(self.area_coeffs, regression_mm))) / 1_000_000.0
+            perimeter_m=max(0.0, float(np.polyval(self.perimeter_coeffs, regression_mm))) / 1000.0
+            # The complex-regression transport correlations need a flow
+            # diameter, not the diameter of a circle with the same area.
+            # For a non-circular pixel port, use hydraulic diameter, D_h=4A/P.
+            hydraulic_diameter_m=(4.0*area_m2/perimeter_m) if perimeter_m>0 else 0.0
+            return area_m2, perimeter_m, hydraulic_diameter_m
+
+        if use_pixel_slot_geometry:
+            _, _, portD=pixel_slot_geometry(startreg)
         fuelden=FuelDensity
         massflowox=mdotox
         chamber_pressure_psi=self.chamberpressure_PSI
@@ -1346,13 +1381,25 @@ class FuelGrain():
                     length = 0
                 else:
                     length=x*(grain_length/amount_of_sections)
-                Diameter=port_diameter
-                area=Diameter*Diameter*np.pi/4
-                peremeter=Diameter*np.pi
+                if use_pixel_slot_geometry:
+                    area, peremeter, Diameter=pixel_slot_geometry(start_regression)
+                else:
+                    Diameter=port_diameter
+                    area=Diameter*Diameter*np.pi/4
+                    peremeter=Diameter*np.pi
                 slot=RegressionSlot(area=area,distance=length,totalregression=start_regression,peremeter=peremeter,Diameter=Diameter,prev_regression=start_regression)
                 slot.initial_diameter=Diameter
                 slots.append(slot)
             return slots
+
+        def update_slot_geometry(slot):
+            """Update a slot after its local regression increment."""
+            if use_pixel_slot_geometry:
+                slot.area, slot.peremeter, slot.Diameter=pixel_slot_geometry(slot.totalregression)
+            else:
+                slot.Diameter += 2*slot.prev_regression*timestep
+                slot.area = slot.Diameter*slot.Diameter*np.pi/4
+                slot.peremeter = slot.Diameter*np.pi
 
         def get_constant_values(pressure,stoicOF):
             if lookup_table is None:
@@ -1388,6 +1435,16 @@ class FuelGrain():
             prandtl_number=get_local_cea_state(Chamberpressure,Local_OF,Nozzle_expansion_ratio)[2]
             Lcon_local=0.29+(0.0019*(x_inlength/Diameter))
             return ((0.022*(prandtl_number**-0.6)*(List_of_constants[4]**0.77)*(List_of_constants[3]**0.23))/((viscosity**List_of_constants[5])*(tempratio**Lcon_local)))
+        def get_blowingandCF(flux,hydroD,viscosity,Chamberpressure,Local_OF,Nozzle_expansion_ratio,mdotfuel,surfacearea):
+            reynoldsnumber=(flux*hydroD)/viscosity
+            skinFrictionstaright=0.074/(reynoldsnumber**0.2)
+            surfacemassflux=mdotfuel/surfacearea
+            streamvelocity=get_local_cea_state(Chamberpressure,Local_OF,Nozzle_expansion_ratio)[3]
+            chamberdensity=get_local_cea_state(Chamberpressure,Local_OF,Nozzle_expansion_ratio)[0]
+            blowingnormal=surfacemassflux/(chamberdensity*streamvelocity*0.5*skinFrictionstaright)
+            return blowingnormal,skinFrictionstaright
+        #def get_helix_blowing_and_cf(self):
+        
 
         def update_reg_slot_1(list,OFstartguess,chamber_pressure_psi,list_of_constants,startDiameter,current_time=0.0,verbose=True):
             last_regression=0.0
@@ -1421,18 +1478,17 @@ class FuelGrain():
                         viscosity=get_dynamic_viscosity(chamber_pressure_psi,OF_local,temp_values[1])
                         A_con=get_Acon_for_regression_slot(OF_local,chamber_pressure_psi,startDiameter,x.distance,list_of_constants,viscosity,temp_values[2])
                         localregression=(A_con/fuelden)*(1+2*(((x.totalflux*startDiameter)/viscosity)**-0.22)*(2.74**((x.distance*-0.4)/lengthinFG)))*((oxflux**(list_of_constants[5]+1))*(startDiameter**list_of_constants[5]))
+                        #blowingnormal,skinFrictionstaright=get_blowingandCF(fuelflux,x.Diameter,viscosity,chamber_pressure_psi,OF_local,Nozzle_expansion_ratio,mdotfuel,x.surfacearea)
                         amount_reg_difference=abs(1-(localregression/last_regression))
                         last_regression=localregression
                         iteration_count+=1
                         if amount_reg_difference<0.0001:
                             iterate=False
                 x.prev_regression = localregression
-                x.Diameter += 2*localregression*timestep
                 # Match hardregresstionattemp.py: retain the running radial
                 # regression total rather than deriving it from diameter.
                 x.totalregression += localregression*timestep
-                x.area = x.Diameter*x.Diameter*np.pi/4
-                x.peremeter = x.Diameter*np.pi
+                update_slot_geometry(x)
                 x.OF = OFstartguess if x.distance==0 else OF_local
                 x.totalflux=oxflux+fuelflux
                 x.mdotfuel=mdotfuel
@@ -1496,9 +1552,7 @@ class FuelGrain():
                 x.totalflux=oxflux+ x.fuelflux
 
                 x.totalregression += localregression * timestep
-                x.Diameter += 2 * localregression * timestep
-                x.area = x.Diameter * x.Diameter * np.pi / 4
-                x.peremeter = x.Diameter * np.pi
+                update_slot_geometry(x)
 
                 end_regression = localregression
                 lastmdotfuel = mdotfuel
@@ -1575,6 +1629,11 @@ class FuelGrain():
             self.regression_slots=make_reg_slots()
             self.complex_regression_history=[]
             self.complex_total_fuel_mass_kg=0.0
+            self.complex_uses_pixel_geometry=use_pixel_slot_geometry
+            if use_pixel_slot_geometry:
+                print("Complex regression: using pixel area/perimeter equations for every slot.")
+            else:
+                print("Complex regression: using built-in circular area/perimeter equations for every slot.")
             self.regression_slots=update_reg_slot_1(self.regression_slots,OFstartguess,chamber_pressure_psi,list_of_constants,portD,current_time=self.time,verbose=False)
         else:
             update_mdot_from_previous_profile(self.regression_slots)
@@ -1620,7 +1679,12 @@ class FuelGrain():
             self.totalregression_MM=mean_total_regression*1000.0
             self.area_grain=mean_port_area
             self.portperimeter=mean_port_perimeter
-            self.diameter_grain=np.sqrt(4.0*mean_port_area/np.pi) if mean_port_area>0 else 0.0
+            # ``slot.Diameter`` is the pixel-port hydraulic diameter (4A/P),
+            # so preserve that definition in the motor-level summary state.
+            self.diameter_grain=(
+                float(np.mean([slot.Diameter for slot in self.regression_slots]))
+                if self.regression_slots else 0.0
+            )
             self.fuelgrain_raduis=self.diameter_grain/2.0
             self.hydrolicdiamter=self.diameter_grain
             self.oxflux=massflowox/mean_port_area if mean_port_area>0 else 0.0
@@ -1648,6 +1712,8 @@ class FuelGrain():
                     "total_fuel_mass_kg": self.complex_total_fuel_mass_kg,
                 })
         return self.regression_slots
+
+    
 
     def export_complex_regression_csv(self, filename="complex_regression.csv"):
         """Write complex-regression slots to their own CSV, never output_thrust.csv."""

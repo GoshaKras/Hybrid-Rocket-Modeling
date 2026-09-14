@@ -123,18 +123,22 @@ REGRESSION_RATE_MM_PER_S = 1.0          # Normal fuel regression rate used to bu
 SIMULATION_TIME_S = 50.0                # Total regression time used to build fits
 SLIDER_STEPS = 11                       # Standalone viewer setting; motor fits use graph points below
 DISPLAY_LENGTH_UNIT = "mm"              # "mm", "cm", "m", or "in" for plots/viewer labels
-OPEN_INTERACTIVE_VIEWER = True         # Open the X/Y/Z interactive viewer after calculation
+OPEN_INTERACTIVE_VIEWER = False         # Open the X/Y/Z interactive viewer after calculation
 SMOOTH_VIEWER_RENDERING = False         # Smooth displayed slice edges; does not alter calculations
 SHOW_PLANE_PREVIEW = True               # Show plane picker before the long rasterization
 SAVE_SELECTED_PLANE_ANALYSIS = True     # Generate selected-plane CSV plus curve-fit plots
 SELECTED_PLANE_ANALYSIS_PLOT = "selected_plane_regression.png"  # Core plot PNG name
 SELECTED_PLANE_ANALYSIS_CSV = "selected_plane_regression.csv"   # Measurement CSV name
 SELECTED_PLANE_CURVE_FITS_CSV = "selected_plane_curve_fits.csv" # Piecewise-fit CSV name
-SAVE_SELECTED_PLANE_ANALYSIS_PLOT = True  # Write curve-fit PNG files to disk
-SHOW_SELECTED_PLANE_ANALYSIS_AFTER_VIEWER = True  # Open curve-fit windows after slider closes
+SAVE_SELECTED_PLANE_ANALYSIS_PLOT = False  # Write curve-fit PNG files to disk
+SHOW_SELECTED_PLANE_ANALYSIS_AFTER_VIEWER = False  # Open curve-fit windows after slider closes
 SHOW_CURVE_FIT_EQUATIONS_ON_PLOTS = False  # Show equations in graph panels; CSV always includes them
 SELECTED_PLANE_GRAPH_POINTS = 100        # Regression samples used for selected-plane curves/fits
 STOP_SELECTED_PLANE_GRAPHS_WHEN_FUEL_IS_GONE = True  # Stop graph/fit at first empty selected-plane slice
+# Experimental only: the voxel marching-cubes bore surface can overestimate
+# area from stair-step facets.  Keep this False for the calibrated OBJ-bore
+# surface curve used by the normal motor-model workflow.
+USE_TRIANGULATED_BORE_SURFACE_AREA = False
 OUTPUT_FOLDER = "regression_outputs"    # Folder for generated CSV and PNG files
 EXPORT_REGRESSED_SNAPSHOT_MM = None     # Set (for example) 25.0 to export remaining fuel as OBJ
 REGRESSED_SNAPSHOT_FILENAME = "regressed_fuel_snapshot.obj"  # Snapshot OBJ filename
@@ -317,12 +321,15 @@ if True:
     Override_effectivelengthconstant=True
     Usepixel_calcs_SAV=True
     burntimecutoff=10
-    Do_complex_regression=False
-    Print_complex_regression=False
+    Do_complex_regression=True
+    Print_complex_regression=True
     Use_cea_lookuptable=True
     TotalMaxExpectedChamberPressure_PSI=1000.0
     Max_expected_pressure_psi=500
-    Use_complex_reg_values=False
+    Use_complex_reg_values=True
+    # True: pixel area/perimeter fits; False: built-in circular slot geometry.
+    Complex_regression_use_pixel_geometry=True
+    
     # Pixel geometry source: "three_d" uses the voxel model's whole-grain
     # port volume and burning surface; "slice" uses slice area/perimeter
     # multiplied by PIXEL_SLICE_LENGTH_M (None = FuelGrainLength).
@@ -669,6 +676,7 @@ def print_mode_summary():
     print(f"Gosha-star geometry:            {state(Is_FuelGrain_GoshaStar)}")
     print(f"Complex regression:             {state(Do_complex_regression)}")
     if Do_complex_regression:
+        print(f"  Complex uses pixel geometry:  {state(Complex_regression_use_pixel_geometry)}")
         print(f"  Complex values drive motor:   {state(complex_drives_motor)}")
         print(f"  CEA lookup table:             {state(Use_cea_lookuptable)}")
     print(f"Easy nozzle regression:         {state(Is_easy_nozzle_regression)}")
@@ -705,6 +713,8 @@ if Is_FuelGrain_PixelMethod==True:
     regression_3d.SHOW_SELECTED_PLANE_ANALYSIS_AFTER_VIEWER = SHOW_SELECTED_PLANE_ANALYSIS_AFTER_VIEWER
     regression_3d.SHOW_CURVE_FIT_EQUATIONS_ON_PLOTS = SHOW_CURVE_FIT_EQUATIONS_ON_PLOTS
     regression_3d.STOP_SELECTED_PLANE_GRAPHS_WHEN_FUEL_IS_GONE = STOP_SELECTED_PLANE_GRAPHS_WHEN_FUEL_IS_GONE
+    regression_3d.REGRESSION_RATE_MM_PER_S = REGRESSION_RATE_MM_PER_S
+    regression_3d.USE_TRIANGULATED_BORE_SURFACE_AREA = USE_TRIANGULATED_BORE_SURFACE_AREA
     regression_3d.OUTPUT_FOLDER = OUTPUT_FOLDER
     regression_3d.SMOOTH_VIEWER_RENDERING = SMOOTH_VIEWER_RENDERING
     plane_name = HIGH_RESOLUTION_PLANE.strip().upper()
@@ -808,6 +818,7 @@ try:
                 OFstartguess=40,
                 mdotox=OxtankMath.RealMassFlowRate,
                 usecomplexregression=Use_complex_reg_values,
+                use_pixel_geometry=Complex_regression_use_pixel_geometry,
                 Do_complex_regression=Do_complex_regression,
                 Print_complex_regression=Print_complex_regression,
                 Use_cea_lookuptable=Use_cea_lookuptable,

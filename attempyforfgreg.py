@@ -28,6 +28,7 @@ import numpy as np
 import trimesh
 from scipy import ndimage
 from scipy.spatial import ConvexHull, QhullError
+from skimage import measure
 from skimage.draw import polygon
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
@@ -44,20 +45,27 @@ if not hasattr(ResizeEvent, "inaxes"):
 # =============================================================================
 # USER SETTINGS — change these values, then press Run in your IDE.
 # =============================================================================
-OBJ_FILE = "hypertek stuff.obj"       # OBJ fuel-grain file in this folder
+OBJ_FILE = "circlehellixed.obj"       # OBJ fuel-grain file in this folder
 # The named plane is the high-resolution cross-section; its normal is the
 # lower-resolution length direction. Example: "X" means a detailed Y-Z slice.
 HIGH_RESOLUTION_PLANE = "X"            # "X", "Y", or "Z"
 IN_PLANE_RESOLUTION = 500               # 500 x 500 pixels in the selected cross-section
 LENGTH_RESOLUTION = 200                 # Number of slices along the selected plane normal
+# Use the modeled axial length so numerator and denominator describe the same
+# grain. An explicit override in millimetres must match the OBJ's axial length.
+SURFACE_AREA_RATIO_GRAIN_LENGTH_MM = None
+# The marching-cubes surface of the coarse voxel port can substantially
+# overestimate a helical bore because it triangulates voxel stair-steps.  Keep
+# it opt-in for experiments; the default uses the calibrated OBJ-bore curve.
+USE_TRIANGULATED_BORE_SURFACE_AREA = False
 # Kept for old command-line compatibility; the two settings above control IDE runs.
 RESOLUTION = IN_PLANE_RESOLUTION
 REGRESSION_RATE_MM_PER_S = 1.0         # Normal fuel regression rate
 SIMULATION_TIME_S = 50.0               # Total simulated burn time
-SLIDER_STEPS = 21                       # Number of regression/time positions in the slider
+SLIDER_STEPS = 101                      # Number of regression/time positions in the slider
 DISPLAY_LENGTH_UNIT = "mm"             # "mm", "cm", "m", or "in" for plots and viewer labels
 OPEN_INTERACTIVE_VIEWER = True          # Open the X/Y/Z interactive viewer after calculating
-SMOOTH_VIEWER_RENDERING = False         # Smooth the displayed slice edges; does not alter calculations
+SMOOTH_VIEWER_RENDERING = True         # Smooth the displayed slice edges; does not alter calculations
 SHOW_PLANE_PREVIEW = True               # Show the selected 500x500 plane before the long calculation starts
 SAVE_SELECTED_PLANE_ANALYSIS = True      # Generate selected-plane CSV plus curve-fit plots
 SELECTED_PLANE_ANALYSIS_PLOT = "selected_plane_regression.png"
@@ -66,7 +74,7 @@ SELECTED_PLANE_CURVE_FITS_CSV = "selected_plane_curve_fits.csv"
 SAVE_SELECTED_PLANE_ANALYSIS_PLOT = True  # Write the curve-fit PNG to disk
 SHOW_SELECTED_PLANE_ANALYSIS_AFTER_VIEWER = True  # Open curve-fit window after closing the slider viewer
 SHOW_CURVE_FIT_EQUATIONS_ON_PLOTS = False  # Show piecewise equations in each graph (CSV always contains them)
-SELECTED_PLANE_GRAPH_POINTS = 50     # Number of regression samples used for the selected-plane curves
+SELECTED_PLANE_GRAPH_POINTS = 101     # Number of regression samples used for the selected-plane curves
 STOP_SELECTED_PLANE_GRAPHS_WHEN_FUEL_IS_GONE = True  # Stop graph/fit at the first empty selected-plane slice
 OUTPUT_FOLDER = "regression_outputs"  # Folder for generated CSV and PNG files
 EXPORT_REGRESSED_SNAPSHOT_MM = 50  # Set (for example) 25.0 to export remaining fuel as an OBJ
@@ -91,7 +99,7 @@ def display_unit_scale(unit: str) -> tuple[str, float]:
 
 
 @contextmanager
-def activity_indicator(message: str, triangle_count: int):
+def activity_indicator(message: str, triangle_count: int | None = None):
     """Show an elapsed-time status while an operation has no real progress API."""
     finished = threading.Event()
     started = time.monotonic()
@@ -105,15 +113,27 @@ def activity_indicator(message: str, triangle_count: int):
             frame += 1
 
     worker = threading.Thread(target=report, daemon=True)
-    print(f"{message} (this OBJ has {triangle_count:,} triangles)", flush=True)
+    detail = f" (this OBJ has {triangle_count:,} triangles)" if triangle_count is not None else ""
+    print(f"{message}{detail}", flush=True)
     worker.start()
+    status = "failed"
     try:
         yield
+        status = "complete"
     finally:
         finished.set()
         worker.join()
         elapsed = time.monotonic() - started
-        print(f"\r{message} complete in {elapsed:.1f}s.{' ' * 25}", flush=True)
+        print(f"\r{message} {status} in {elapsed:.1f}s.{' ' * 25}", flush=True)
+
+
+def regression_progress(distances: np.ndarray, label: str):
+    """Report completed samples, including time spent on the current sample."""
+    started = time.monotonic()
+    for index, regression in enumerate(distances, start=1):
+        with activity_indicator(f"{label}: sample {index}/{len(distances)} ({regression:.3f} mm)..."):
+            yield regression
+    print(f"{label}: finished in {time.monotonic() - started:.1f}s.", flush=True)
 
 
 def load_mesh(path: Path, scale_to_mm: float) -> trimesh.Trimesh:
@@ -291,37 +311,69 @@ def interface_area(port: np.ndarray, fuel: np.ndarray, pitch: np.ndarray) -> flo
 
 def slice_metrics(port: np.ndarray, solid: np.ndarray, axis: int, index: int,
                   pitch: np.ndarray) -> tuple[float, float]:
-    """Port area and fuel-facing perimeter for a specified voxel slice."""
+    """Port area and Euclidean fuel-facing perimeter for one voxel slice."""
     port_2d = np.take(port, index, axis=axis)
     solid_2d = np.take(solid, index, axis=axis)
     plane_axes = [value for value in range(3) if value != axis]
     area = float(np.count_nonzero(port_2d) * np.prod(pitch[plane_axes]))
-    # Count only faces between the port and remaining fuel.  This deliberately
-    # excludes port-to-outside faces after burn-through: the external grain
-    # boundary has no fuel on its other side and therefore cannot burn.
-    port_rows_before, port_rows_after = port_2d[:-1, :], port_2d[1:, :]
-    fuel_rows_before, fuel_rows_after = solid_2d[:-1, :], solid_2d[1:, :]
-    row_interfaces = (np.count_nonzero(port_rows_before & fuel_rows_after) +
-                      np.count_nonzero(fuel_rows_before & port_rows_after))
-    port_columns_before, port_columns_after = port_2d[:, :-1], port_2d[:, 1:]
-    fuel_columns_before, fuel_columns_after = solid_2d[:, :-1], solid_2d[:, 1:]
-    column_interfaces = (np.count_nonzero(port_columns_before & fuel_columns_after) +
-                         np.count_nonzero(fuel_columns_before & port_columns_after))
-    perimeter = float(row_interfaces * pitch[plane_axes[1]] +
-                      column_interfaces * pitch[plane_axes[0]])
+
+    # Pixel-edge counting produces a Manhattan-length perimeter.  For a
+    # circular port it overestimates the true circumference by nearly 4/pi.
+    # Crofton's four-direction estimator instead recovers Euclidean perimeter
+    # from the number of line intersections with the raster boundary.
+    spacing=np.asarray(pitch[plane_axes], dtype=float)
+    sample_pitch=float(np.min(spacing))
+    if np.isclose(spacing[0], spacing[1]):
+        square_pixels=port_2d
+    else:
+        # ``perimeter_crofton`` assumes square pixels.  Nearest-neighbour
+        # resampling creates square physical pixels without blurring the port
+        # boundary, while retaining support for non-circular grain bounds.
+        zoom=spacing/sample_pitch
+        square_pixels=ndimage.zoom(port_2d.astype(np.uint8), zoom, order=0) > 0
+    perimeter=float(measure.perimeter_crofton(square_pixels, directions=4)*sample_pitch)
     return area, perimeter
 
 
 def burning_surface_area(port: np.ndarray, fuel: np.ndarray, pitch: np.ndarray, axis: int) -> float:
-    """Integrate the high-resolution port perimeter along the grain length.
+    """Integrate Euclidean port perimeter along the axial grain length.
 
     This avoids the artificial surface-area increase caused by counting the
-    staircase faces between low-resolution length slices.
+    staircase faces between low-resolution length slices.  It is the projected
+    bore area; a separately triangulated 3-D calculation is required to add
+    helix wall stretch.
     """
     return float(sum(
         slice_metrics(port, fuel, axis, index, pitch)[1] * pitch[axis]
         for index in range(1, port.shape[axis] - 1)
     ))
+
+
+def triangulated_bore_surface_area(port: np.ndarray, pitch: np.ndarray, axis: int) -> float:
+    """Measure the lateral bore surface from a marching-cubes port mesh.
+
+    Unlike ``burning_surface_area()``, this preserves axial wall slope, so a
+    helical port has more area than planar perimeter times grain length.  The
+    port mesh has artificial caps at its two axial ends; those triangles are
+    excluded by their axial centroids.
+    """
+    occupied=np.argwhere(port)
+    if len(occupied) == 0:
+        return 0.0
+    lower=np.maximum(occupied.min(axis=0) - 1, 0)
+    upper=np.minimum(occupied.max(axis=0) + 2, np.asarray(port.shape))
+    crop=port[tuple(slice(int(start), int(stop)) for start, stop in zip(lower, upper))]
+    if np.count_nonzero(crop) < 2:
+        return 0.0
+    port_mesh=trimesh.voxel.ops.matrix_to_marching_cubes(crop, pitch=pitch)
+    axial_pitch=float(pitch[axis])
+    axial_centres=port_mesh.triangles_center[:, axis]
+    # For a crop spanning N axial voxels, marching cubes places the caps just
+    # outside [0, (N - 1) * pitch].  Keep the lateral wall between those caps.
+    lateral=(axial_centres >= -0.25*axial_pitch) & (
+        axial_centres <= (crop.shape[axis] - 1 + 0.25)*axial_pitch
+    )
+    return float(np.sum(port_mesh.area_faces[lateral]))
 
 
 def mesh_bore_surface_area(mesh: trimesh.Trimesh, axis: int) -> float:
@@ -350,16 +402,18 @@ def mesh_bore_surface_area(mesh: trimesh.Trimesh, axis: int) -> float:
 def export_regressed_fuel_snapshot(solid: np.ndarray, initial_port: np.ndarray, pitch: np.ndarray,
                                    regression_mm: float, path: Path) -> None:
     """Export the remaining voxelized fuel at a requested regression distance as OBJ."""
-    distance_to_port = ndimage.distance_transform_edt(~initial_port, sampling=pitch)
+    with activity_indicator("Calculating snapshot distance field..."):
+        distance_to_port = ndimage.distance_transform_edt(~initial_port, sampling=pitch)
     remaining = solid & ~(solid & (distance_to_port <= regression_mm))
     if not np.any(remaining):
         print(f"Warning: snapshot at {regression_mm:.3f} mm was skipped because no fuel remains. "
               "Choose a smaller EXPORT_REGRESSED_SNAPSHOT_MM value to export a model.")
         return
     # Marching cubes turns the anisotropic voxel model into a triangle mesh.
-    snapshot = trimesh.voxel.ops.matrix_to_marching_cubes(remaining, pitch=pitch)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    snapshot.export(path)
+    with activity_indicator("Building and writing snapshot mesh..."):
+        snapshot = trimesh.voxel.ops.matrix_to_marching_cubes(remaining, pitch=pitch)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot.export(path)
     print(f"Regressed-fuel snapshot at {regression_mm:.3f} mm written to: {path}")
 
 
@@ -437,17 +491,24 @@ def port_bounding_circles(port_2d: np.ndarray, plane_pitch: np.ndarray) -> tuple
 
 def regression_table(solid: np.ndarray, initial_port: np.ndarray, pitch: np.ndarray, axis: int,
                      distances: np.ndarray, mesh_volume: float, mesh_area: float,
-                     initial_bore_area: float | None = None) -> list[dict[str, float]]:
+                     initial_bore_area: float | None = None,
+                     use_triangulated_bore_surface_area: bool = False) -> list[dict[str, float]]:
     """Calculate port geometry at each normal-regression distance."""
     # distance_transform_edt measures distance from each fuel voxel to port.
-    distance_to_port = ndimage.distance_transform_edt(~initial_port, sampling=pitch)
+    with activity_indicator("Calculating whole-grain 3-D distance field..."):
+        distance_to_port = ndimage.distance_transform_edt(~initial_port, sampling=pitch)
     initial_fuel_volume = float(np.count_nonzero(solid) * np.prod(pitch))
     rows: list[dict[str, float]] = []
-    for regression in distances:
+    for regression in regression_progress(distances, "Whole-grain regression"):
         burned = solid & (distance_to_port <= regression)
         port = initial_port | burned
         remaining = solid & ~burned
         port_area, perimeter = centre_slice_metrics(port, remaining, axis, pitch)
+        surface_area=(
+            triangulated_bore_surface_area(port, pitch, axis)
+            if use_triangulated_bore_surface_area
+            else burning_surface_area(port, remaining, pitch, axis)
+        )
         rows.append({
             "regression_mm": float(regression),
             "center_port_area_mm2": port_area,
@@ -457,11 +518,11 @@ def regression_table(solid: np.ndarray, initial_port: np.ndarray, pitch: np.ndar
             "burned_fuel_volume_mm3": float(np.count_nonzero(burned) * np.prod(pitch)),
             "remaining_fuel_volume_mm3": float(np.count_nonzero(remaining) * np.prod(pitch)),
             "initial_fuel_volume_mm3": initial_fuel_volume,
-            "burning_surface_area_mm2": burning_surface_area(port, remaining, pitch, axis),
+            "burning_surface_area_mm2": surface_area,
             "mesh_enclosed_volume_mm3": mesh_volume,
             "mesh_total_surface_area_mm2": mesh_area,
         })
-    if initial_bore_area is not None:
+    if initial_bore_area is not None and not use_triangulated_bore_surface_area:
         measured_initial_area = rows[0]["burning_surface_area_mm2"]
         if measured_initial_area <= 0.0:
             raise ValueError("Cannot normalize bore surface area: the initial port has no surface")
@@ -484,9 +545,22 @@ def write_csv(rows: list[dict[str, float]], path: Path) -> None:
 
 
 def picked_plane_regression(solid: np.ndarray, initial_port: np.ndarray, pitch: np.ndarray, axis: int,
-                            distances: np.ndarray) -> list[dict[str, float]]:
+                            distances: np.ndarray,
+                            initial_bore_area: float | None = None,
+                            surface_area_rows: list[dict[str, float]] | None = None,
+                            surface_area_ratio_grain_length_mm: float | None = None) -> list[dict[str, float]]:
     """Calculate detailed 2-D regression measurements for the selected plane."""
-    distance_to_port = ndimage.distance_transform_edt(~initial_port, sampling=pitch)
+    with activity_indicator("Calculating selected-plane 3-D distance field..."):
+        distance_to_port = ndimage.distance_transform_edt(~initial_port, sampling=pitch)
+    # The grid has one padding slice at each end.  The remaining axial extent
+    # is the physical fuel-grain length represented by the voxel model.
+    modeled_grain_length_mm=float((solid.shape[axis] - 2) * pitch[axis])
+    fuel_grain_length_mm=(
+        modeled_grain_length_mm if surface_area_ratio_grain_length_mm is None
+        else float(surface_area_ratio_grain_length_mm)
+    )
+    if fuel_grain_length_mm <= 0.0:
+        raise ValueError("surface_area_ratio_grain_length_mm must be positive")
     plane_axes = [number for number in range(3) if number != axis]
     rows: list[dict[str, float]] = []
     slice_index = solid.shape[axis] // 2
@@ -519,7 +593,7 @@ def picked_plane_regression(solid: np.ndarray, initial_port: np.ndarray, pitch: 
         largest_run = min(sample_count, max(ends - starts))
         return 2.0 * radius, total_contact, float(largest_run * arc_step)
 
-    for regression in distances:
+    for regression in regression_progress(distances, "Selected-plane regression"):
         burned = solid & (distance_to_port <= regression)
         port = initial_port | burned
         remaining = solid & ~burned
@@ -544,11 +618,25 @@ def picked_plane_regression(solid: np.ndarray, initial_port: np.ndarray, pitch: 
             min_enclosing_diameter = float(2.0 * np.max(np.linalg.norm(port_points * pitch[plane_axes] - center, axis=1)))
         else:
             min_enclosing_diameter = 0.0
+        # This compares the fully integrated 3-D burning surface with the
+        # usual selected-plane estimate, perimeter times grain length.
+        # Supplied whole-grain areas replace this value below. Avoid repeating
+        # the expensive integral over every axial slice when it is discarded.
+        real_surface_area_mm2=(
+            burning_surface_area(port, remaining, pitch, axis)
+            if surface_area_rows is None else 0.0
+        )
+        plane_surface_area_mm2=perimeter*fuel_grain_length_mm
         rows.append({
             "regression_mm": float(regression),
             "time_s": float(regression / REGRESSION_RATE_MM_PER_S),
             "port_area_mm2": area,
             "port_perimeter_mm": perimeter,
+            "fuel_grain_length_mm": fuel_grain_length_mm,
+            "surface_area_ratio": (
+                float(real_surface_area_mm2/plane_surface_area_mm2)
+                if plane_surface_area_mm2 > 0.0 else 0.0
+            ),
             "hydraulic_diameter_mm": float(4.0 * area / perimeter) if perimeter else 0.0,
             "max_inscribed_diameter_mm": max_inscribed_diameter,
             "min_enclosing_diameter_mm": min_enclosing_diameter,
@@ -558,9 +646,70 @@ def picked_plane_regression(solid: np.ndarray, initial_port: np.ndarray, pitch: 
                                               np.prod(pitch[plane_axes])),
             "port_volume_mm3": float(np.count_nonzero(port) * np.prod(pitch)),
             "burned_fuel_volume_mm3": float(np.count_nonzero(burned) * np.prod(pitch)),
-            "burning_surface_area_mm2": burning_surface_area(port, remaining, pitch, axis),
+            "burning_surface_area_mm2": real_surface_area_mm2,
             "burnthrough": burnthrough,
         })
+    if surface_area_rows is not None:
+        # Use precisely the same whole-grain surface-area samples used by the
+        # surface-area graph.  Interpolation only aligns those samples with
+        # the selected-plane regression distances; it does not scale them.
+        surface_x=np.asarray([row["regression_mm"] for row in surface_area_rows], dtype=float)
+        surface_y=np.asarray([row["burning_surface_area_mm2"] for row in surface_area_rows], dtype=float)
+        if len(surface_x) < 2 or np.any(np.diff(surface_x) < 0.0):
+            raise ValueError("surface_area_rows must contain at least two regression-ordered rows")
+        for row in rows:
+            row["burning_surface_area_mm2"]=float(np.interp(row["regression_mm"], surface_x, surface_y))
+            denominator=row["port_perimeter_mm"]*fuel_grain_length_mm
+            row["surface_area_ratio_raw"]=(
+                row["burning_surface_area_mm2"]/denominator
+                if denominator > 0.0 else 0.0
+            )
+    elif initial_bore_area is not None:
+        measured_initial_area=rows[0]["burning_surface_area_mm2"]
+        if measured_initial_area <= 0.0:
+            raise ValueError("Cannot normalize selected-plane surface area: the initial port has no surface")
+        # Use the same OBJ-triangle calibration as regression_table().  This
+        # matters for helical bores: the voxel perimeter integral is a
+        # projected area, while the measured initial bore area has wall slope.
+        correction=initial_bore_area/measured_initial_area
+        for row in rows:
+            row["burning_surface_area_mm2"] *= correction
+            denominator=row["port_perimeter_mm"]*row["fuel_grain_length_mm"]
+            row["surface_area_ratio"]=(
+                row["burning_surface_area_mm2"]/denominator
+                if denominator > 0.0 else 0.0
+            )
+
+    # A single raster slice has small contour quantization steps.  Surface
+    # area is a whole-grain quantity, so use the smooth selected-plane
+    # perimeter trend in its displayed correction factor, while retaining the
+    # point-by-point raw value above for inspection in the CSV.
+    regression_x=np.asarray([row["regression_mm"] for row in rows], dtype=float)
+    perimeter_y=np.asarray([row["port_perimeter_mm"] for row in rows], dtype=float)
+    burnthrough_indices=np.flatnonzero(np.asarray(
+        [row["burnthrough"] for row in rows], dtype=bool
+    ))
+    perimeter_burnthrough_index=(
+        int(burnthrough_indices[0]) if len(burnthrough_indices) else None
+    )
+    perimeter_branches=piecewise_polynomial_fit(
+        regression_x, perimeter_y, perimeter_burnthrough_index
+    )
+    for index, row in enumerate(rows):
+        branch_index=(
+            1 if perimeter_burnthrough_index is not None
+            and index >= perimeter_burnthrough_index
+            and len(perimeter_branches) > 1 else 0
+        )
+        _, _, perimeter_poly, perimeter_degree, perimeter_r_squared=perimeter_branches[branch_index]
+        fitted_perimeter=max(0.0, float(perimeter_poly(row["regression_mm"])))
+        row["surface_area_ratio_perimeter_fit_mm"]=fitted_perimeter
+        row["surface_area_ratio_perimeter_fit_degree"]=perimeter_degree
+        row["surface_area_ratio_perimeter_fit_r_squared"]=perimeter_r_squared
+        denominator=fitted_perimeter*fuel_grain_length_mm
+        row["surface_area_ratio"]=(
+            row["burning_surface_area_mm2"]/denominator if denominator > 0.0 else 0.0
+        )
     return rows
 
 
@@ -645,15 +794,18 @@ def save_picked_plane_analysis(rows: list[dict[str, float]], axis: int, path: Pa
         ("port_volume_mm3", f"Whole-grain port volume ({display_unit}³)", display_scale ** 3),
         ("burned_fuel_volume_mm3", f"Burned fuel volume ({display_unit}³)", display_scale ** 3),
         ("burning_surface_area_mm2", f"Whole-grain burning surface ({display_unit}²)", display_scale ** 2),
+        ("surface_area_ratio", "Surface-area ratio: real surface / (fitted plane perimeter × grain length)", 1.0),
     ]
     core_figure, core_plots = plt.subplots(4, 2, figsize=(13, 17), constrained_layout=True)
     contact_figure, contact_plots = plt.subplots(2, 2, figsize=(13, 9), constrained_layout=True)
+    surface_ratio_figure, surface_ratio_plot = plt.subplots(1, 1, figsize=(8, 5.5), constrained_layout=True)
     # Keep chart order while placing core geometry in the first window and
     # contact-only measurements in the second.
     plots = np.asarray([
         core_plots.flat[0], core_plots.flat[1], core_plots.flat[2], core_plots.flat[3],
         contact_plots.flat[0], contact_plots.flat[1], contact_plots.flat[2],
         core_plots.flat[4], core_plots.flat[5], core_plots.flat[6],
+        surface_ratio_plot,
     ])
     core_plots.flat[7].set_visible(False)
     contact_plots.flat[3].set_visible(False)
@@ -723,6 +875,9 @@ def save_picked_plane_analysis(rows: list[dict[str, float]], axis: int, path: Pa
     contact_figure.suptitle(
         f"Selected {('X', 'Y', 'Z')[axis]} plane: circle/contact fits ({status})"
     )
+    surface_ratio_figure.suptitle(
+        f"Selected {('X', 'Y', 'Z')[axis]} plane: surface-area correction fit ({status})"
+    )
     helix_figure = None
     helix_path = None
     if "pitch_mm" in rows[0] and "radius_of_curvature_mm" in rows[0]:
@@ -742,6 +897,8 @@ def save_picked_plane_analysis(rows: list[dict[str, float]], axis: int, path: Pa
         core_figure.savefig(path, dpi=180, bbox_inches="tight")
         contact_path = path.with_name(f"{path.stem}_contact_metrics{path.suffix}")
         contact_figure.savefig(contact_path, dpi=180, bbox_inches="tight")
+        surface_ratio_path = path.with_name(f"{path.stem}_surface_area_ratio{path.suffix}")
+        surface_ratio_figure.savefig(surface_ratio_path, dpi=180, bbox_inches="tight")
         if helix_figure is not None:
             helix_path = path.with_name(f"{path.stem}_helix_geometry{path.suffix}")
             helix_figure.savefig(helix_path, dpi=180, bbox_inches="tight")
@@ -750,6 +907,7 @@ def save_picked_plane_analysis(rows: list[dict[str, float]], axis: int, path: Pa
     if path is not None:
         print(f"Selected-plane plots written to: {path}")
         print(f"Selected-plane contact plots written to: {contact_path}")
+        print(f"Selected-plane surface-area-ratio plot written to: {surface_ratio_path}")
         if helix_path is not None:
             print(f"Helix-geometry plot written to: {helix_path}")
     print(f"Selected-plane curve-fit equations written to: {curve_fits_path}")
@@ -764,6 +922,7 @@ def save_picked_plane_analysis(rows: list[dict[str, float]], axis: int, path: Pa
         plt.show()
     plt.close(core_figure)
     plt.close(contact_figure)
+    plt.close(surface_ratio_figure)
     if helix_figure is not None:
         plt.close(helix_figure)
 
@@ -1081,8 +1240,13 @@ def main() -> int:
         mesh_volume = abs(float(mesh.volume))
     bore_area = mesh_bore_surface_area(mesh, axis)
     print(f"Initial bore surface measured from OBJ triangles: {bore_area:.6f} mm^2")
-    rows = regression_table(solid, port, pitch, axis, distances, mesh_volume, float(mesh.area),
-                            initial_bore_area=bore_area)
+    if USE_TRIANGULATED_BORE_SURFACE_AREA:
+        print("Measuring 3-D triangulated bore surface at every regression state...")
+    rows = regression_table(
+        solid, port, pitch, axis, distances, mesh_volume, float(mesh.area),
+        initial_bore_area=bore_area,
+        use_triangulated_bore_surface_area=USE_TRIANGULATED_BORE_SURFACE_AREA,
+    )
     helix_dimensions = None
     if IS_HELICAL_SWEEP:
         # For a helix r(theta) = (r cos theta, r sin theta, P theta / 2pi),
@@ -1103,7 +1267,11 @@ def main() -> int:
     plane_rows: list[dict[str, float]] | None = None
     if SAVE_SELECTED_PLANE_ANALYSIS and not args.no_plane_analysis:
         graph_distances = np.linspace(0.0, max_regression_mm, SELECTED_PLANE_GRAPH_POINTS)
-        plane_rows = picked_plane_regression(solid, port, pitch, axis, graph_distances)
+        plane_rows = picked_plane_regression(
+            solid, port, pitch, axis, graph_distances,
+            surface_area_rows=rows,
+            surface_area_ratio_grain_length_mm=SURFACE_AREA_RATIO_GRAIN_LENGTH_MM,
+        )
         if helix_dimensions is not None:
             for row in plane_rows:
                 row.update({"is_helical_sweep": True, **helix_dimensions})
