@@ -99,7 +99,7 @@ if print_mdot==True:
     y_values= []
     for simulation_number, diameter in enumerate(x_values, start=1):
             print(f"Simulation {simulation_number}/{len(x_values)}")
-            mdot_calc,hdot_calc=mdot(PSI_PA(730), 101325, 298.15, 'O2', area(diameter), 0.6)
+            mdot_calc,hdot_calc=mdot(PSI_PA(820), 101325, 298.15, 'H2', area(diameter), 0.6)
         
             y_values.append(mdot_calc)
     y_values = np.array(y_values)
@@ -118,7 +118,7 @@ if print_fill==True:
     for simulation_number, diameter in enumerate(x_values, start=1):
         print(f"Simulation {simulation_number}/{len(x_values)}")
         fill_time = sim_filling(
-            volume, 730, 0.01, 'O2', PSI_PA(1000),
+            volume, 820, 0.01, 'H2', PSI_PA(1000),
             print_status=False, area_orf=area(diameter)
         )
         y_values.append(fill_time)

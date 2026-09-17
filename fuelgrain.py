@@ -39,6 +39,10 @@ class RegressionSlot:
     Nominal_port_D: float = 0.0
     Helix_loop_d: float = 0.0
     surfacearea: float = 0.0
+    P_max_inscribed_diameter: float = 0.0
+    P_min_enclosing_diameter: float = 0.0
+    P_largest_arm_contact: float = 0.0
+    regratio: float = 0.0
 
 
 class CEALookupTable:
@@ -137,6 +141,387 @@ class CEALookupTable:
 # =============================================================================
 
 
+
+
+
+class _ComplexRegressionStep:
+    """Helpers and temporary state for one complex-regression timestep.
+
+    A new instance keeps the exact CEA cache local to each call. Persistent
+    slot/history state remains on the owning FuelGrain instance.
+    """
+
+    def __init__(self, grain, cea, timestep):
+        self.grain = grain
+        self.CEAforRocket = cea
+        self.timestep = timestep
+
+    def pixel_slot_geometry(self, regression_m):
+        regression_mm=regression_m*1000.0
+        area_m2=max(0.0, float(np.polyval(self.grain.area_coeffs, regression_mm))) / 1_000_000.0
+        perimeter_m=max(0.0, float(np.polyval(self.grain.perimeter_coeffs, regression_mm))) / 1000.0
+        # The complex-regression transport correlations need a flow
+        # diameter, not the diameter of a circle with the same area.
+        # For a non-circular pixel port, use hydraulic diameter, D_h=4A/P.
+        hydraulic_diameter_m=(4.0*area_m2/perimeter_m) if perimeter_m>0 else 0.0
+        return area_m2, perimeter_m, hydraulic_diameter_m
+
+
+    def get_local_cea_state(self, pressure, OF, expansion_ratio=1):
+        key=(pressure, OF, expansion_ratio)
+        if key not in self.cea_state_cache:
+            if self.lookup_table is not None:
+                lookup_state=self.lookup_table.state(pressure, OF)
+                if lookup_state is not None:
+                    self.cea_state_cache[key]=lookup_state
+                    return self.cea_state_cache[key]
+            # get_Chamber_Transport performs one CEA solve.  Its result
+            # leaves the exact chamber temperature and molecular-weight
+            # fields in RocketCEA's common Fortran output block, so do
+            # not make a second get_IvacCstrTc_ChmMwGam solve for them.
+            cp, _, _, prandtl_number=self.CEAforRocket.get_Chamber_Transport(
+                Pc=pressure, MR=OF, eps=expansion_ratio, frozen=0
+            )
+            chamber_index=self.CEAforRocket.i_chm
+            temperature_rankine=py_cea.prtout.ttt[chamber_index]*1.8
+            molecular_weight=py_cea.prtout.wm[chamber_index]
+            try:
+                molecular_weight=1.0/py_cea.prtout.totn[chamber_index]
+            except Exception:
+                pass
+            self.cea_state_cache[key]=(
+                temperature_rankine*0.555556,
+                molecular_weight*0.45359237,
+                prandtl_number,
+                cp,
+            )
+        return self.cea_state_cache[key]
+
+
+    def make_reg_slots(self, amount_of_slots, grain_length, port_diameter, start_regression):
+        slots=[]
+        for x in range(amount_of_slots):
+            if amount_of_slots <= 1:
+                length = 0
+            else:
+                length=x*(grain_length/self.amount_of_sections)
+            if self.use_pixel_slot_geometry:
+                area, peremeter, Diameter=self.pixel_slot_geometry(start_regression)
+            else:
+                Diameter=port_diameter
+                area=Diameter*Diameter*np.pi/4
+                peremeter=Diameter*np.pi
+            slot=RegressionSlot(area=area,distance=length,totalregression=start_regression,peremeter=peremeter,Diameter=Diameter,prev_regression=start_regression)
+            slot.initial_diameter=Diameter
+            self.update_slot_pixel_properties(slot)
+            slots.append(slot)
+        return slots
+
+
+    def update_slot_geometry(self, slot):
+        """Update a slot after its local regression increment."""
+        if self.use_pixel_slot_geometry:
+            slot.area, slot.peremeter, slot.Diameter=self.pixel_slot_geometry(slot.totalregression)
+        else:
+            slot.Diameter += 2*slot.prev_regression*self.timestep
+            slot.area = slot.Diameter*slot.Diameter*np.pi/4
+            slot.peremeter = slot.Diameter*np.pi
+        self.update_slot_pixel_properties(slot)
+
+    def update_slot_pixel_properties(self,slot):
+        """Store local fitted diameters and arm contact in meters."""
+        if self.use_pixel_slot_geometry:
+            regression_mm=slot.totalregression*1000
+            for property_name,coeff_name in (
+                ("P_max_inscribed_diameter","max_inscribed_coeffs"),
+                ("P_min_enclosing_diameter","min_enclosing_coeffs"),
+                ("P_largest_arm_contact","largest_arm_coeffs"),
+            ):
+                coeffs=getattr(self.grain,coeff_name,None)
+                if coeffs is None:
+                    raise RuntimeError(f"Pixel slot properties require {coeff_name}; run regression analysis first.")
+                setattr(slot,property_name,max(0.0,float(np.polyval(coeffs,regression_mm)))/1000)
+        else:
+            slot.P_max_inscribed_diameter=slot.Diameter
+            slot.P_min_enclosing_diameter=slot.Diameter
+            slot.P_largest_arm_contact=0.0
+
+
+    def get_constant_values(self, pressure,stoicOF):
+        if self.lookup_table is None:
+            temp_of_flame=(self.CEAforRocket.get_Temperatures(Pc=pressure, MR=stoicOF, eps=1, frozen=0)[0])*0.555556
+            temp_of_surface=(self.CEAforRocket.get_Temperatures(Pc=self.chamber_pressure_psi, MR=0, eps=1, frozen=0)[0])*0.555556
+            specific_heat_surface=(self.CEAforRocket.get_Chamber_Cp(Pc=pressure, MR=0, eps=1)*4.184)
+            specific_heat_flame=(self.CEAforRocket.get_Chamber_Cp(Pc=pressure, MR=stoicOF, eps=1)*4.184)
+        else:
+            flame_state=self.get_local_cea_state(pressure,stoicOF)
+            surface_state=self.get_local_cea_state(self.chamber_pressure_psi,0.0)
+            temp_of_flame=flame_state[0]
+            temp_of_surface=surface_state[0]
+            specific_heat_surface=surface_state[3]*4.184
+            specific_heat_flame=flame_state[3]*4.184
+        deltaH=specific_heat_flame*(temp_of_flame-self.ref_temp_H)-specific_heat_surface*(temp_of_surface-self.ref_temp_H)
+        enthapy_ratio=(deltaH/self.Hg_frompaper)
+        Phi_C=(1.22*stoicOF*enthapy_ratio)/(self.koX+(stoicOF+self.koX)*enthapy_ratio)
+        k_constant=(-0.005*(self.activation_energy/(8.314*temp_of_surface)))-0.08
+        return [deltaH,temp_of_surface,temp_of_flame,enthapy_ratio,Phi_C,k_constant]
+
+
+    def get_temps(self, pressure,OF,list_of_constants):
+        temp_cea_local=self.get_local_cea_state(pressure,OF)[0]
+        bulktemp_local=(temp_cea_local+list_of_constants[1]+list_of_constants[2])/3
+        tempratio_local=(list_of_constants[1]/bulktemp_local)
+        return [temp_cea_local,bulktemp_local,tempratio_local]
+
+
+    def get_dynamic_viscosity(self, pressure,OF,bulktemp):
+        moleweightmixture=self.get_local_cea_state(pressure,OF)[1]
+        meanmoleweight=(self.moleweightN20+moleweightmixture)/2
+        return 26.69*(np.sqrt(meanmoleweight*bulktemp/(self.sigma_hardspherediameter**2)))*10**-7
+
+
+    def get_Acon_for_regression_slot(self, Local_OF,Chamberpressure,Diameter,x_inlength,List_of_constants,viscosity,tempratio,Nozzle_expansion_ratio=1):
+        prandtl_number=self.get_local_cea_state(Chamberpressure,Local_OF,Nozzle_expansion_ratio)[2]
+        Lcon_local=0.29+(0.0019*(x_inlength/Diameter))
+        return ((0.022*(prandtl_number**-0.6)*(List_of_constants[4]**0.77)*(List_of_constants[3]**0.23))/((viscosity**List_of_constants[5])*(tempratio**Lcon_local)))
+
+
+
+    def get_blowingandCF(self, flux,hydroD,viscosity,Chamberpressure,Local_OF,Nozzle_expansion_ratio,regression,fuelden):
+        reynoldsnumber=(flux*hydroD)/viscosity
+        skinFrictionstaright=0.074/(reynoldsnumber**0.2)
+        surfacemassflux=regression*fuelden
+        streamvelocity=self.get_local_cea_state(Chamberpressure,Local_OF,Nozzle_expansion_ratio)[3]
+        chamberdensity=self.get_local_cea_state(Chamberpressure,Local_OF,Nozzle_expansion_ratio)[0]
+        blowingnormal=surfacemassflux/(chamberdensity*streamvelocity*0.5*skinFrictionstaright)
+        part_helixblow=surfacemassflux*streamvelocity
+        part_helixwallshear=(chamberdensity*streamvelocity**2)/8
+        return blowingnormal,skinFrictionstaright,part_helixblow,part_helixwallshear
+    
+
+    def get_blowing_and_cf_helix(self,hydroD,whole_helixstatus,Start_hyD,HelixP_meters,helixloopdiameter,Area,P_max_inscribed_diameter,P_min_enclosing_diameter,AmountofSmallCircles,totalrgession,cfstraight,sandgrainroughness,part_helixblow,part_helixwallshear,perimeter,P_largest_arm_contact,blowingnormal):
+        if whole_helixstatus==True:
+            helixnominaldiameter=hydroD
+            RC=(helixloopdiameter/2)*(1+(HelixP_meters/(3.14*helixloopdiameter))**2)
+            CorrectionRC=(np.sqrt(1+1.57*(((hydroD-Start_hyD)/RC)**2)))*RC
+            ratio_forCF=1
+        else:
+            helixNominalarea=((Area-((P_max_inscribed_diameter/2)**2*3.14))/(AmountofSmallCircles*0.5))
+            helixnominaldiameter=np.sqrt(helixNominalarea/3.14)*2
+            helixloopdiameter_calc=P_max_inscribed_diameter+(P_min_enclosing_diameter -P_max_inscribed_diameter)*0.5
+            RC=(helixloopdiameter_calc/2)*(1+(HelixP_meters/(3.14*helixloopdiameter_calc))**2)
+            Correctionfactor=(np.sqrt(1+6.28*(totalrgession/2*AmountofSmallCircles/RC)**2))
+            CorrectionRC=Correctionfactor*RC
+            ratio_forCF=(perimeter-AmountofSmallCircles*P_largest_arm_contact)/perimeter
+        CFhelix=cfstraight+0.0075*(np.sqrt(helixnominaldiameter/(2*CorrectionRC)))
+        fc=self.grain.calculate_fc(epsilon=sandgrainroughness/(hydroD/2),r0=hydroD/2,radius=CorrectionRC)
+        helixwallshear=fc*part_helixwallshear
+        blowinghelix=part_helixblow/helixwallshear
+        blowingratio=(blowingnormal/blowinghelix)*0.77
+        regratio=(((CFhelix*blowingratio/cfstraight)-1)*ratio_forCF*ratio_forCF)+1
+        return regratio
+    
+        
+        
+
+        
+
+    
+
+    
+
+    def update_reg_slot_1(self, list,OFstartguess,chamber_pressure_psi,list_of_constants,startDiameter,current_time=0.0,verbose=True,use_helix,Nozzle_expansion_ratio,helixstatus,helix_P,helixloop,amountofsmallcircles,sandgrainroughness):
+        last_regression=0.0
+        end_regression=0.0
+        lastmdotfuel=0.0
+        for x in list:
+            iterate=True
+            iteration_count=0
+            oxflux=self.massflowox/x.area
+            while iterate==True:
+                if x.distance==0:
+                    fuelflux=oxflux/OFstartguess
+                    x.totalflux=oxflux+fuelflux
+                    temp_values=self.get_temps(chamber_pressure_psi,OFstartguess,list_of_constants)
+                    viscosity=self.get_dynamic_viscosity(chamber_pressure_psi,OFstartguess,temp_values[1])
+                    A_con=self.get_Acon_for_regression_slot(OFstartguess,chamber_pressure_psi,startDiameter,x.distance,list_of_constants,viscosity,temp_values[2])
+                    localregression=(A_con/self.fuelden)*(1+2*(((x.totalflux*startDiameter)/viscosity)**-0.22)*(2.74**((x.distance*-0.4)/self.lengthinFG)))*((oxflux**(list_of_constants[5]+1))*(startDiameter**list_of_constants[5]))
+                    end_regression=localregression
+                    last_regression=localregression
+                    mdotfuel=0.0
+                    iterate=False
+                    #x.regratio=1
+                else:
+                    
+                    mdotfuel=(self.fuelden*((last_regression + end_regression)/2)*x.peremeter*self.eachsectionlength)+lastmdotfuel
+                    OF_local=self.massflowox/mdotfuel
+                    if OF_local>OFstartguess:
+                        OF_local=OFstartguess
+                        mdotfuel=self.massflowox/OFstartguess
+                    fuelflux=mdotfuel/x.area
+                    x.totalflux=oxflux+fuelflux
+                    temp_values=self.get_temps(chamber_pressure_psi,OF_local,list_of_constants)
+                    viscosity=self.get_dynamic_viscosity(chamber_pressure_psi,OF_local,temp_values[1])
+                    A_con=self.get_Acon_for_regression_slot(OF_local,chamber_pressure_psi,startDiameter,x.distance,list_of_constants,viscosity,temp_values[2])
+                    localregression=(A_con/self.fuelden)*(1+2*(((x.totalflux*startDiameter)/viscosity)**-0.22)*(2.74**((x.distance*-0.4)/self.lengthinFG)))*((oxflux**(list_of_constants[5]+1))*(startDiameter**list_of_constants[5]))
+                    if use_helix==True:
+                        blowingnormal,skinFrictionstaright,part_helixblow,part_helixwallshear= self.get_blowingandCF(fuelflux,x.Diameter,viscosity,chamber_pressure_psi,OF_local,Nozzle_expansion_ratio,regression=last_regression, fuelden=self.fuelden)
+                        regratio=self.get_blowing_and_cf_helix(x.Diameter,whole_helixstatus=helixstatus,Start_hyD=startDiameter,HelixP_meters=helix_P,helixloopdiameter=helixloop,Area=x.area,P_max_inscribed_diameter=x.P_max_inscribed_diameter,P_min_enclosing_diameter=x.P_min_enclosing_diameter,AmountofSmallCircles=amountofsmallcircles,totalrgession=x.totalregression,cfstraight=skinFrictionstaright,sandgrainroughness=sandgrainroughness,part_helixblow=part_helixblow,part_helixwallshear=part_helixwallshear,perimeter=x.peremeter,P_largest_arm_contact=x.P_largest_arm_contact,blowingnormal=blowingnormal)
+                        if x.regratio<1:
+                            x.regratio=1
+                    else:
+                        x.regratio=1
+                    localregression=localregression*x.regratio
+                    amount_reg_difference=abs(1-(localregression/last_regression))
+                    last_regression=localregression
+                    iteration_count+=1
+                    if amount_reg_difference<0.0001:
+                        iterate=False
+            x.prev_regression = localregression
+            # Match hardregresstionattemp.py: retain the running radial
+            # regression total rather than deriving it from diameter.
+            x.totalregression += localregression*self.timestep
+            self.update_slot_geometry(x)
+            x.OF = OFstartguess if x.distance==0 else OF_local
+            x.totalflux=oxflux+fuelflux
+            x.mdotfuel=mdotfuel
+            x.fuelflux=fuelflux
+            end_regression=localregression
+            lastmdotfuel=mdotfuel
+        return list
+
+
+    def update_reg_slot_after_regression(self, list,OFstartguess,chamber_pressure_psi,list_of_constants,startDiameter,current_time=0.0,verbose=True,use_helix,Nozzle_expansion_ratio,helixstatus,helix_P,helixloop,amountofsmallcircles,sandgrainroughness):
+        """Second-and-later-step updater from hardregresstionattemp.py."""
+        last_regression=0.0
+        end_regression=0.0
+        lastmdotfuel=0.0
+        mdotfuel=0.0
+        localregression=0.0
+        fuelflux=0.0
+        OF_local=OFstartguess
+        for x in list:
+            iterate=True
+            iteration_count=0
+            oxflux=self.massflowox/x.area
+            if x.distance==0:
+                fuelflux=oxflux/OFstartguess
+                x.totalflux=oxflux+fuelflux
+                temp_values=self.get_temps(chamber_pressure_psi,OF_local,list_of_constants)
+                viscosity=self.get_dynamic_viscosity(chamber_pressure_psi,OF_local,temp_values[1])
+                A_con=self.get_Acon_for_regression_slot(OF_local,chamber_pressure_psi,startDiameter,x.distance,list_of_constants,viscosity,temp_values[2])
+                localregression=(A_con/self.fuelden)*(1+2*(((x.totalflux*startDiameter)/viscosity)**-0.22)*(2.74**((x.distance*-0.4)/self.lengthinFG)))*((oxflux**(list_of_constants[5]+1))*(startDiameter**list_of_constants[5]))
+                mdotfuel=0.0
+                lastmdotfuel=0.0
+            else:
+                # Match the standalone fallback and cap behavior.
+                prevstep_cumulative=getattr(x, 'mdot_from_fit', None)
+                if prevstep_cumulative is not None:
+                    mdotfuel=prevstep_cumulative
+                else:
+                    mdotfuel=self.massflowox/OFstartguess
+                if mdotfuel <= 0:
+                    mdotfuel=1e-12
+                OF_local=self.massflowox/mdotfuel
+                if OF_local>OFstartguess:
+                    OF_local=OFstartguess
+                    mdotfuel=self.massflowox/OF_local
+                fuelflux=mdotfuel/x.area
+                x.totalflux=oxflux+fuelflux
+                temp_values=self.get_temps(chamber_pressure_psi,OF_local,list_of_constants)
+                viscosity=self.get_dynamic_viscosity(chamber_pressure_psi,OF_local,temp_values[1])
+                A_con=self.get_Acon_for_regression_slot(OF_local,chamber_pressure_psi,startDiameter,x.distance,list_of_constants,viscosity,temp_values[2])
+                localregression=(A_con/self.fuelden)*(1+2*(((x.totalflux*startDiameter)/viscosity)**-0.22)*(2.74**((x.distance*-0.4)/self.lengthinFG)))*((oxflux**(list_of_constants[5]+1))*(startDiameter**list_of_constants[5]))
+                if use_helix==True:
+                    blowingnormal,skinFrictionstaright,part_helixblow,part_helixwallshear= self.get_blowingandCF(fuelflux,x.Diameter,viscosity,chamber_pressure_psi,OF_local,Nozzle_expansion_ratio,regression=last_regression, fuelden=self.fuelden)
+                    regratio=self.get_blowing_and_cf_helix(x.Diameter,whole_helixstatus=helixstatus,Start_hyD=startDiameter,HelixP_meters=helix_P,helixloopdiameter=helixloop,Area=x.area,P_max_inscribed_diameter=x.P_max_inscribed_diameter,P_min_enclosing_diameter=x.P_min_enclosing_diameter,AmountofSmallCircles=amountofsmallcircles,totalrgession=x.totalregression,cfstraight=skinFrictionstaright,sandgrainroughness=sandgrainroughness,part_helixblow=part_helixblow,part_helixwallshear=part_helixwallshear,perimeter=x.peremeter,P_largest_arm_contact=x.P_largest_arm_contact,blowingnormal=blowingnormal)
+                    if x.regratio<1:
+                        x.regratio=1
+                    else:
+                        x.regratio=1
+                localregression=localregression*x.regratio
+            x.prev_regression = localregression
+            if verbose:
+                print('Regression Rate for slot at distance', x.distance, 'm:', localregression*1000, 'mm/s',current_time, 's')
+                print('OF for slot at distance', x.distance, 'm:', OF_local)
+                print('mdotfuel for slot at distance', x.distance, 'm:', mdotfuel)
+                print('fuelflux for slot at distance', x.distance, 'm:', fuelflux)
+                print(iteration_count, 'iterations to converge for slot at distance', x.distance, 'm')
+            x.mdotfuel = x.peremeter*localregression*self.fuelden*self.eachsectionlength + lastmdotfuel
+            lastmdotfuel = x.mdotfuel
+            x.OF = OF_local
+            x.fuelflux =fuelflux
+            x.totalflux=oxflux+ x.fuelflux
+
+            x.totalregression += localregression * self.timestep
+            self.update_slot_geometry(x)
+
+            end_regression = localregression
+            lastmdotfuel = mdotfuel
+        return list
+
+
+    def update_mdot_from_previous_profile(self, slots, target_r2=0.98, max_degree=6):
+        """Reproduce hardregresstionattemp.py's polynomial-fit mdot pass.
+
+        The standalone model fits ``previous regression * perimeter`` as
+        a function of axial distance, analytically integrates that fitted
+        polynomial from the inlet to each station, then multiplies by
+        density.  Keep the same fit order selection and normalization
+        here so ``mdot_from_fit`` has the same meaning in both models.
+        """
+        if not slots:
+            return
+
+        ordered_slots=sorted(slots, key=lambda slot: slot.distance)
+        x=np.asarray([slot.distance for slot in ordered_slots], dtype=float)
+        y=np.asarray(
+            [slot.prev_regression*slot.peremeter for slot in ordered_slots],
+            dtype=float,
+        )
+        valid_mask=np.isfinite(x) & np.isfinite(y)
+        x=x[valid_mask]
+        y=y[valid_mask]
+        if len(x)<2:
+            for slot in slots:
+                slot.mdot_from_fit=0.0
+            return
+
+        x_mean=np.mean(x)
+        x_scale=np.max(np.abs(x-x_mean))
+        if x_scale==0:
+            x_scale=1.0
+        x_norm=(x-x_mean)/x_scale
+
+        best_r2=-np.inf
+        best_coeffs=None
+        max_d=min(max_degree, len(x)-1)
+        for degree in range(1, max_d+1):
+            coeffs_norm=np.polyfit(x_norm, y, degree)
+            fitted=np.poly1d(coeffs_norm)(x_norm)
+            ss_res=np.sum((y-fitted)**2)
+            ss_tot=np.sum((y-np.mean(y))**2)
+            r2=1-(ss_res/ss_tot) if ss_tot!=0 else 1.0
+            if r2>best_r2:
+                best_r2=r2
+                best_coeffs=coeffs_norm
+            if r2>=target_r2:
+                break
+
+        # This is the same un-normalization and analytical integration
+        # used by plot_mdot_vs_distance() in hardregresstionattemp.py.
+        u_poly=np.poly1d([1.0/x_scale, -x_mean/x_scale])
+        poly_norm=np.poly1d(best_coeffs)
+        poly_x=np.poly1d([0.0])
+        for index, coefficient in enumerate(poly_norm.coeffs):
+            degree=len(poly_norm.coeffs)-index-1
+            poly_x=poly_x+coefficient*(u_poly**degree)
+        integral_poly_x=poly_x.integ()
+        inlet_distance=0.0
+
+        for slot in slots:
+            volume_flow=float(integral_poly_x(slot.distance)-integral_poly_x(inlet_distance))
+            slot.mdot_from_fit=self.fuelden*volume_flow
 
 
 
@@ -971,6 +1356,12 @@ class FuelGrain():
         self.chamberDensity= CEAforRocket.get_Chamber_Density(Pc=self.chamberpressure_PSI, MR=self.OF)*16.01846 #convert from lb/ft^3 to kg/m^3
 
     @staticmethod
+    def _fc_residual(fc, epsilon, radius_ratio_sqrt):
+        """Residual of the Reynolds-free implicit friction relation."""
+        log_argument = 0.104 * epsilon / fc * radius_ratio_sqrt
+        return 1 / np.sqrt(fc) + 0.923 * np.log(log_argument)
+
+    @staticmethod
     def calculate_fc(epsilon, r0, radius):
         """Return F_c from the Reynolds-free implicit friction relation."""
         if min(epsilon, r0, radius) <= 0:
@@ -978,18 +1369,17 @@ class FuelGrain():
 
         radius_ratio_sqrt = np.sqrt(r0 / radius)
 
-        def residual(fc):
-            log_argument = 0.104 * epsilon / fc * radius_ratio_sqrt
-            return 1 / np.sqrt(fc) + 0.923 * np.log(log_argument)
-
         candidates = np.logspace(-12, 0, 400)
         for lower, upper in zip(candidates[:-1], candidates[1:]):
-            lower_residual = residual(lower)
-            upper_residual = residual(upper)
+            lower_residual = FuelGrain._fc_residual(lower, epsilon, radius_ratio_sqrt)
+            upper_residual = FuelGrain._fc_residual(upper, epsilon, radius_ratio_sqrt)
             if lower_residual == 0:
                 return lower
             if lower_residual * upper_residual < 0:
-                return scp.optimize.brentq(residual, lower, upper)
+                return scp.optimize.brentq(
+                    FuelGrain._fc_residual, lower, upper,
+                    args=(epsilon, radius_ratio_sqrt),
+                )
 
         raise ValueError("The Reynolds-free F_c equation has no positive solution between 1e-12 and 1")
 
@@ -1262,20 +1652,21 @@ class FuelGrain():
                           cea_lookup_pressure_points=31,
                           cea_lookup_of_points=61,
                           usecomplexregression=False,
-                          use_pixel_geometry=None):
-        """Near-verbatim port of hardregresstionattemp.py from line 214.
+                          use_pixel_geometry=None,Nozzle_expansion_ratio,helixstatus,amountofsmallcircles,sandgrainroughness):
+        """Advance complex regression with a fresh helper context per timestep.
 
-        Variable names and the original calculation order are intentionally
-        retained so they can be mapped to this class manually.
+        Helpers live on _ComplexRegressionStep; the original calculation order,
+        per-call CEA cache, and persistent grain/slot updates are preserved.
         """
         if not Do_complex_regression:
             return []
 
-        amount_of_sections=amount_of_slots-1
+        step = _ComplexRegressionStep(self, CEAforRocket, timestep)
+        step.amount_of_sections=amount_of_slots-1
         # ``totalregression`` is the radial change from the initial local
         # diameter, so both quantities must start at zero deformation.
         startreg=0.0
-        lengthinFG=FuelGrainLength
+        step.lengthinFG=FuelGrainLength
         portD=self.diameter_grain
         # The pixel method supplies selected-plane area/perimeter equations as
         # functions of radial regression.  Complex regression has independent
@@ -1283,10 +1674,10 @@ class FuelGrain():
         # local regression distance.
         # None preserves automatic selection for existing callers. An explicit
         # False selects the built-in circular formulas even in pixel mode.
-        use_pixel_slot_geometry=(
+        step.use_pixel_slot_geometry=(
             self.Is_pixel if use_pixel_geometry is None else use_pixel_geometry
         )
-        if use_pixel_slot_geometry and (
+        if step.use_pixel_slot_geometry and (
             self.area_coeffs is None or self.perimeter_coeffs is None
         ):
             raise RuntimeError(
@@ -1294,30 +1685,19 @@ class FuelGrain():
                 "Run run_regression_analysis() before complexregression()."
             )
 
-        def pixel_slot_geometry(regression_m):
-            regression_mm=regression_m*1000.0
-            area_m2=max(0.0, float(np.polyval(self.area_coeffs, regression_mm))) / 1_000_000.0
-            perimeter_m=max(0.0, float(np.polyval(self.perimeter_coeffs, regression_mm))) / 1000.0
-            # The complex-regression transport correlations need a flow
-            # diameter, not the diameter of a circle with the same area.
-            # For a non-circular pixel port, use hydraulic diameter, D_h=4A/P.
-            hydraulic_diameter_m=(4.0*area_m2/perimeter_m) if perimeter_m>0 else 0.0
-            return area_m2, perimeter_m, hydraulic_diameter_m
-
-        if use_pixel_slot_geometry:
-            _, _, portD=pixel_slot_geometry(startreg)
-        fuelden=FuelDensity
-        massflowox=mdotox
-        chamber_pressure_psi=self.chamberpressure_PSI
-        Nozzle_expansion_ratio=1
-        moleweightN20=44.013
-        sigma_hardspherediameter=5
-        ref_temp_H=298
-        Hg_frompaper=1812
-        koX=1
-        activation_energy=203*1000
-        eachsectionlength=lengthinFG/amount_of_sections
-        lookup_table=None
+        if step.use_pixel_slot_geometry:
+            _, _, portD=step.pixel_slot_geometry(startreg)
+        step.fuelden=FuelDensity
+        step.massflowox=mdotox
+        step.chamber_pressure_psi=self.chamberpressure_PSI
+        step.moleweightN20=44.013
+        step.sigma_hardspherediameter=5
+        step.ref_temp_H=298
+        step.Hg_frompaper=1812
+        step.koX=1
+        step.activation_energy=203*1000
+        step.eachsectionlength=step.lengthinFG/step.amount_of_sections
+        step.lookup_table=None
         if Use_cea_lookuptable:
             lookup_key=(
                 str(cea_lookup_filename), tuple(cea_lookup_pressure_range_psi),
@@ -1330,7 +1710,7 @@ class FuelGrain():
                     cea_lookup_of_range, cea_lookup_pressure_points, cea_lookup_of_points,
                 )
                 self._cea_lookup_key=lookup_key
-            lookup_table=self._cea_lookup_table
+            step.lookup_table=self._cea_lookup_table
             if getattr(self, "_cea_lookup_announced_key", None) != lookup_key:
                 print(
                     "Using CEA lookup table: "
@@ -1342,302 +1722,28 @@ class FuelGrain():
         # CEA calls dominate runtime.  Cache exact state queries for this
         # timestep; no pressure/O/F rounding is used, so this does not alter
         # any regression inputs or equations.
-        cea_state_cache={}
+        step.cea_state_cache={}
 
-        def get_local_cea_state(pressure, OF, expansion_ratio=1):
-            key=(pressure, OF, expansion_ratio)
-            if key not in cea_state_cache:
-                if lookup_table is not None:
-                    lookup_state=lookup_table.state(pressure, OF)
-                    if lookup_state is not None:
-                        cea_state_cache[key]=lookup_state
-                        return cea_state_cache[key]
-                # get_Chamber_Transport performs one CEA solve.  Its result
-                # leaves the exact chamber temperature and molecular-weight
-                # fields in RocketCEA's common Fortran output block, so do
-                # not make a second get_IvacCstrTc_ChmMwGam solve for them.
-                cp, _, _, prandtl_number=CEAforRocket.get_Chamber_Transport(
-                    Pc=pressure, MR=OF, eps=expansion_ratio, frozen=0
-                )
-                chamber_index=CEAforRocket.i_chm
-                temperature_rankine=py_cea.prtout.ttt[chamber_index]*1.8
-                molecular_weight=py_cea.prtout.wm[chamber_index]
-                try:
-                    molecular_weight=1.0/py_cea.prtout.totn[chamber_index]
-                except Exception:
-                    pass
-                cea_state_cache[key]=(
-                    temperature_rankine*0.555556,
-                    molecular_weight*0.45359237,
-                    prandtl_number,
-                    cp,
-                )
-            return cea_state_cache[key]
-
-        def make_reg_slots(amount_of_slots=amount_of_slots, grain_length=lengthinFG, port_diameter=portD, start_regression=startreg):
-            slots=[]
-            for x in range(amount_of_slots):
-                if amount_of_slots <= 1:
-                    length = 0
-                else:
-                    length=x*(grain_length/amount_of_sections)
-                if use_pixel_slot_geometry:
-                    area, peremeter, Diameter=pixel_slot_geometry(start_regression)
-                else:
-                    Diameter=port_diameter
-                    area=Diameter*Diameter*np.pi/4
-                    peremeter=Diameter*np.pi
-                slot=RegressionSlot(area=area,distance=length,totalregression=start_regression,peremeter=peremeter,Diameter=Diameter,prev_regression=start_regression)
-                slot.initial_diameter=Diameter
-                slots.append(slot)
-            return slots
-
-        def update_slot_geometry(slot):
-            """Update a slot after its local regression increment."""
-            if use_pixel_slot_geometry:
-                slot.area, slot.peremeter, slot.Diameter=pixel_slot_geometry(slot.totalregression)
-            else:
-                slot.Diameter += 2*slot.prev_regression*timestep
-                slot.area = slot.Diameter*slot.Diameter*np.pi/4
-                slot.peremeter = slot.Diameter*np.pi
-
-        def get_constant_values(pressure,stoicOF):
-            if lookup_table is None:
-                temp_of_flame=(CEAforRocket.get_Temperatures(Pc=pressure, MR=stoicOF, eps=1, frozen=0)[0])*0.555556
-                temp_of_surface=(CEAforRocket.get_Temperatures(Pc=chamber_pressure_psi, MR=0, eps=1, frozen=0)[0])*0.555556
-                specific_heat_surface=(CEAforRocket.get_Chamber_Cp(Pc=pressure, MR=0, eps=1)*4.184)
-                specific_heat_flame=(CEAforRocket.get_Chamber_Cp(Pc=pressure, MR=stoicOF, eps=1)*4.184)
-            else:
-                flame_state=get_local_cea_state(pressure,stoicOF)
-                surface_state=get_local_cea_state(chamber_pressure_psi,0.0)
-                temp_of_flame=flame_state[0]
-                temp_of_surface=surface_state[0]
-                specific_heat_surface=surface_state[3]*4.184
-                specific_heat_flame=flame_state[3]*4.184
-            deltaH=specific_heat_flame*(temp_of_flame-ref_temp_H)-specific_heat_surface*(temp_of_surface-ref_temp_H)
-            enthapy_ratio=(deltaH/Hg_frompaper)
-            Phi_C=(1.22*stoicOF*enthapy_ratio)/(koX+(stoicOF+koX)*enthapy_ratio)
-            k_constant=(-0.005*(activation_energy/(8.314*temp_of_surface)))-0.08
-            return [deltaH,temp_of_surface,temp_of_flame,enthapy_ratio,Phi_C,k_constant]
-
-        def get_temps(pressure,OF,list_of_constants):
-            temp_cea_local=get_local_cea_state(pressure,OF)[0]
-            bulktemp_local=(temp_cea_local+list_of_constants[1]+list_of_constants[2])/3
-            tempratio_local=(list_of_constants[1]/bulktemp_local)
-            return [temp_cea_local,bulktemp_local,tempratio_local]
-
-        def get_dynamic_viscosity(pressure,OF,bulktemp):
-            moleweightmixture=get_local_cea_state(pressure,OF)[1]
-            meanmoleweight=(moleweightN20+moleweightmixture)/2
-            return 26.69*(np.sqrt(meanmoleweight*bulktemp/(sigma_hardspherediameter**2)))*10**-7
-
-        def get_Acon_for_regression_slot(Local_OF,Chamberpressure,Diameter,x_inlength,List_of_constants,viscosity,tempratio,Nozzle_expansion_ratio=Nozzle_expansion_ratio):
-            prandtl_number=get_local_cea_state(Chamberpressure,Local_OF,Nozzle_expansion_ratio)[2]
-            Lcon_local=0.29+(0.0019*(x_inlength/Diameter))
-            return ((0.022*(prandtl_number**-0.6)*(List_of_constants[4]**0.77)*(List_of_constants[3]**0.23))/((viscosity**List_of_constants[5])*(tempratio**Lcon_local)))
-        def get_blowingandCF(flux,hydroD,viscosity,Chamberpressure,Local_OF,Nozzle_expansion_ratio,mdotfuel,surfacearea):
-            reynoldsnumber=(flux*hydroD)/viscosity
-            skinFrictionstaright=0.074/(reynoldsnumber**0.2)
-            surfacemassflux=mdotfuel/surfacearea
-            streamvelocity=get_local_cea_state(Chamberpressure,Local_OF,Nozzle_expansion_ratio)[3]
-            chamberdensity=get_local_cea_state(Chamberpressure,Local_OF,Nozzle_expansion_ratio)[0]
-            blowingnormal=surfacemassflux/(chamberdensity*streamvelocity*0.5*skinFrictionstaright)
-            return blowingnormal,skinFrictionstaright
-        #def get_helix_blowing_and_cf(self):
-        
-
-        def update_reg_slot_1(list,OFstartguess,chamber_pressure_psi,list_of_constants,startDiameter,current_time=0.0,verbose=True):
-            last_regression=0.0
-            end_regression=0.0
-            lastmdotfuel=0.0
-            for x in list:
-                iterate=True
-                iteration_count=0
-                oxflux=massflowox/x.area
-                while iterate==True:
-                    if x.distance==0:
-                        fuelflux=oxflux/OFstartguess
-                        x.totalflux=oxflux+fuelflux
-                        temp_values=get_temps(chamber_pressure_psi,OFstartguess,list_of_constants)
-                        viscosity=get_dynamic_viscosity(chamber_pressure_psi,OFstartguess,temp_values[1])
-                        A_con=get_Acon_for_regression_slot(OFstartguess,chamber_pressure_psi,startDiameter,x.distance,list_of_constants,viscosity,temp_values[2])
-                        localregression=(A_con/fuelden)*(1+2*(((x.totalflux*startDiameter)/viscosity)**-0.22)*(2.74**((x.distance*-0.4)/lengthinFG)))*((oxflux**(list_of_constants[5]+1))*(startDiameter**list_of_constants[5]))
-                        end_regression=localregression
-                        last_regression=localregression
-                        mdotfuel=0.0
-                        iterate=False
-                    else:
-                        mdotfuel=(fuelden*((last_regression + end_regression)/2)*x.peremeter*eachsectionlength)+lastmdotfuel
-                        OF_local=massflowox/mdotfuel
-                        if OF_local>OFstartguess:
-                            OF_local=OFstartguess
-                            mdotfuel=massflowox/OFstartguess
-                        fuelflux=mdotfuel/x.area
-                        x.totalflux=oxflux+fuelflux
-                        temp_values=get_temps(chamber_pressure_psi,OF_local,list_of_constants)
-                        viscosity=get_dynamic_viscosity(chamber_pressure_psi,OF_local,temp_values[1])
-                        A_con=get_Acon_for_regression_slot(OF_local,chamber_pressure_psi,startDiameter,x.distance,list_of_constants,viscosity,temp_values[2])
-                        localregression=(A_con/fuelden)*(1+2*(((x.totalflux*startDiameter)/viscosity)**-0.22)*(2.74**((x.distance*-0.4)/lengthinFG)))*((oxflux**(list_of_constants[5]+1))*(startDiameter**list_of_constants[5]))
-                        #blowingnormal,skinFrictionstaright=get_blowingandCF(fuelflux,x.Diameter,viscosity,chamber_pressure_psi,OF_local,Nozzle_expansion_ratio,mdotfuel,x.surfacearea)
-                        amount_reg_difference=abs(1-(localregression/last_regression))
-                        last_regression=localregression
-                        iteration_count+=1
-                        if amount_reg_difference<0.0001:
-                            iterate=False
-                x.prev_regression = localregression
-                # Match hardregresstionattemp.py: retain the running radial
-                # regression total rather than deriving it from diameter.
-                x.totalregression += localregression*timestep
-                update_slot_geometry(x)
-                x.OF = OFstartguess if x.distance==0 else OF_local
-                x.totalflux=oxflux+fuelflux
-                x.mdotfuel=mdotfuel
-                x.fuelflux=fuelflux
-                end_regression=localregression
-                lastmdotfuel=mdotfuel
-            return list
-
-        def update_reg_slot_after_regression(list,OFstartguess,chamber_pressure_psi,list_of_constants,startDiameter,current_time=0.0,verbose=True):
-            """Second-and-later-step updater from hardregresstionattemp.py."""
-            last_regression=0.0
-            end_regression=0.0
-            lastmdotfuel=0.0
-            mdotfuel=0.0
-            localregression=0.0
-            fuelflux=0.0
-            OF_local=OFstartguess
-            for x in list:
-                iterate=True
-                iteration_count=0
-                oxflux=massflowox/x.area
-                if x.distance==0:
-                    fuelflux=oxflux/OFstartguess
-                    x.totalflux=oxflux+fuelflux
-                    temp_values=get_temps(chamber_pressure_psi,OF_local,list_of_constants)
-                    viscosity=get_dynamic_viscosity(chamber_pressure_psi,OF_local,temp_values[1])
-                    A_con=get_Acon_for_regression_slot(OF_local,chamber_pressure_psi,startDiameter,x.distance,list_of_constants,viscosity,temp_values[2])
-                    localregression=(A_con/fuelden)*(1+2*(((x.totalflux*startDiameter)/viscosity)**-0.22)*(2.74**((x.distance*-0.4)/lengthinFG)))*((oxflux**(list_of_constants[5]+1))*(startDiameter**list_of_constants[5]))
-                    mdotfuel=0.0
-                    lastmdotfuel=0.0
-                else:
-                    # Match the standalone fallback and cap behavior.
-                    prevstep_cumulative=getattr(x, 'mdot_from_fit', None)
-                    if prevstep_cumulative is not None:
-                        mdotfuel=prevstep_cumulative
-                    else:
-                        mdotfuel=massflowox/OFstartguess
-                    if mdotfuel <= 0:
-                        mdotfuel=1e-12
-                    OF_local=massflowox/mdotfuel
-                    if OF_local>OFstartguess:
-                        OF_local=OFstartguess
-                        mdotfuel=massflowox/OF_local
-                    fuelflux=mdotfuel/x.area
-                    x.totalflux=oxflux+fuelflux
-                    temp_values=get_temps(chamber_pressure_psi,OF_local,list_of_constants)
-                    viscosity=get_dynamic_viscosity(chamber_pressure_psi,OF_local,temp_values[1])
-                    A_con=get_Acon_for_regression_slot(OF_local,chamber_pressure_psi,startDiameter,x.distance,list_of_constants,viscosity,temp_values[2])
-                    localregression=(A_con/fuelden)*(1+2*(((x.totalflux*startDiameter)/viscosity)**-0.22)*(2.74**((x.distance*-0.4)/lengthinFG)))*((oxflux**(list_of_constants[5]+1))*(startDiameter**list_of_constants[5]))
-                x.prev_regression = localregression
-                if verbose:
-                    print('Regression Rate for slot at distance', x.distance, 'm:', localregression*1000, 'mm/s',current_time, 's')
-                    print('OF for slot at distance', x.distance, 'm:', OF_local)
-                    print('mdotfuel for slot at distance', x.distance, 'm:', mdotfuel)
-                    print('fuelflux for slot at distance', x.distance, 'm:', fuelflux)
-                    print(iteration_count, 'iterations to converge for slot at distance', x.distance, 'm')
-                x.mdotfuel = x.peremeter*localregression*fuelden*eachsectionlength + lastmdotfuel
-                lastmdotfuel = x.mdotfuel
-                x.OF = OF_local
-                x.fuelflux =fuelflux
-                x.totalflux=oxflux+ x.fuelflux
-
-                x.totalregression += localregression * timestep
-                update_slot_geometry(x)
-
-                end_regression = localregression
-                lastmdotfuel = mdotfuel
-            return list
-
-        def update_mdot_from_previous_profile(slots, target_r2=0.98, max_degree=6):
-            """Reproduce hardregresstionattemp.py's polynomial-fit mdot pass.
-
-            The standalone model fits ``previous regression * perimeter`` as
-            a function of axial distance, analytically integrates that fitted
-            polynomial from the inlet to each station, then multiplies by
-            density.  Keep the same fit order selection and normalization
-            here so ``mdot_from_fit`` has the same meaning in both models.
-            """
-            if not slots:
-                return
-
-            ordered_slots=sorted(slots, key=lambda slot: slot.distance)
-            x=np.asarray([slot.distance for slot in ordered_slots], dtype=float)
-            y=np.asarray(
-                [slot.prev_regression*slot.peremeter for slot in ordered_slots],
-                dtype=float,
-            )
-            valid_mask=np.isfinite(x) & np.isfinite(y)
-            x=x[valid_mask]
-            y=y[valid_mask]
-            if len(x)<2:
-                for slot in slots:
-                    slot.mdot_from_fit=0.0
-                return
-
-            x_mean=np.mean(x)
-            x_scale=np.max(np.abs(x-x_mean))
-            if x_scale==0:
-                x_scale=1.0
-            x_norm=(x-x_mean)/x_scale
-
-            best_r2=-np.inf
-            best_coeffs=None
-            max_d=min(max_degree, len(x)-1)
-            for degree in range(1, max_d+1):
-                coeffs_norm=np.polyfit(x_norm, y, degree)
-                fitted=np.poly1d(coeffs_norm)(x_norm)
-                ss_res=np.sum((y-fitted)**2)
-                ss_tot=np.sum((y-np.mean(y))**2)
-                r2=1-(ss_res/ss_tot) if ss_tot!=0 else 1.0
-                if r2>best_r2:
-                    best_r2=r2
-                    best_coeffs=coeffs_norm
-                if r2>=target_r2:
-                    break
-
-            # This is the same un-normalization and analytical integration
-            # used by plot_mdot_vs_distance() in hardregresstionattemp.py.
-            u_poly=np.poly1d([1.0/x_scale, -x_mean/x_scale])
-            poly_norm=np.poly1d(best_coeffs)
-            poly_x=np.poly1d([0.0])
-            for index, coefficient in enumerate(poly_norm.coeffs):
-                degree=len(poly_norm.coeffs)-index-1
-                poly_x=poly_x+coefficient*(u_poly**degree)
-            integral_poly_x=poly_x.integ()
-            inlet_distance=0.0
-
-            for slot in slots:
-                volume_flow=float(integral_poly_x(slot.distance)-integral_poly_x(inlet_distance))
-                slot.mdot_from_fit=fuelden*volume_flow
+       
 
         # Stoichiometric O/F is fixed for a given CEA fuel/oxidizer object.
         if not hasattr(self, "_complex_stoich_of"):
             self._complex_stoich_of=CEAforRocket.getMRforER(ERphi=1.0)
         StoicOF=self._complex_stoich_of
-        list_of_constants=get_constant_values(chamber_pressure_psi,StoicOF)
+        list_of_constants=step.get_constant_values(step.chamber_pressure_psi,StoicOF)
         if not hasattr(self, "regression_slots"):
-            self.regression_slots=make_reg_slots()
+            self.regression_slots=step.make_reg_slots(amount_of_slots, step.lengthinFG, portD, startreg)
             self.complex_regression_history=[]
             self.complex_total_fuel_mass_kg=0.0
-            self.complex_uses_pixel_geometry=use_pixel_slot_geometry
-            if use_pixel_slot_geometry:
+            self.complex_uses_pixel_geometry=step.use_pixel_slot_geometry
+            if step.use_pixel_slot_geometry:
                 print("Complex regression: using pixel area/perimeter equations for every slot.")
             else:
                 print("Complex regression: using built-in circular area/perimeter equations for every slot.")
-            self.regression_slots=update_reg_slot_1(self.regression_slots,OFstartguess,chamber_pressure_psi,list_of_constants,portD,current_time=self.time,verbose=False)
+            self.regression_slots=step.update_reg_slot_1(self.regression_slots,OFstartguess,step.chamber_pressure_psi,list_of_constants,portD,current_time=self.time,verbose=False,use_helix=self.Is_helix,Nozzle_expansion_ratio=Nozzle_expansion_ratio,helixstatus=helixstatus,helix_P=self.HelixP_meters,helixloop=self.helixloopdiameter,amountofsmallcircles=amountofsmallcircles,sandgrainroughness=sandgrainroughness)
         else:
-            update_mdot_from_previous_profile(self.regression_slots)
-            self.regression_slots=update_reg_slot_after_regression(self.regression_slots,OFstartguess,chamber_pressure_psi,list_of_constants,portD,current_time=self.time,verbose=False)
+            step.update_mdot_from_previous_profile(self.regression_slots)
+            self.regression_slots=step.update_reg_slot_after_regression(self.regression_slots,OFstartguess,step.chamber_pressure_psi,list_of_constants,portD,current_time=self.time,verbose=False)
 
         mdot_fullgrain=self.regression_slots[-1].mdotfuel if self.regression_slots else 0.0
         self.complex_total_fuel_mass_kg+=mdot_fullgrain*timestep
@@ -1668,9 +1774,9 @@ class FuelGrain():
             self.complex_mdot_fullgrain=mdot_fullgrain
             self.complex_average_regression_m_per_s=average_regression_m_per_s
             self.mdotfuel=mdot_fullgrain
-            self.totalmdot=mdot_fullgrain+massflowox
+            self.totalmdot=mdot_fullgrain+step.massflowox
             self.sum_modtfuel+=mdot_fullgrain*timestep
-            self.OF=massflowox/mdot_fullgrain if mdot_fullgrain>0 else np.inf
+            self.OF=step.massflowox/mdot_fullgrain if mdot_fullgrain>0 else np.inf
             self.regression_M_persec=average_regression_m_per_s
             self.regression_MM_persec=average_regression_m_per_s*1000.0
             self.regression_M_persec_withratio=average_regression_m_per_s
@@ -1687,7 +1793,7 @@ class FuelGrain():
             )
             self.fuelgrain_raduis=self.diameter_grain/2.0
             self.hydrolicdiamter=self.diameter_grain
-            self.oxflux=massflowox/mean_port_area if mean_port_area>0 else 0.0
+            self.oxflux=step.massflowox/mean_port_area if mean_port_area>0 else 0.0
             self.insurfacearea=mean_port_perimeter*FuelGrainLength*self.effectivelengthconstant
             self.volume_grain=mean_port_area*FuelGrainLength
 

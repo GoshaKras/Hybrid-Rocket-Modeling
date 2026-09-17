@@ -822,7 +822,7 @@ try:
                 Do_complex_regression=Do_complex_regression,
                 Print_complex_regression=Print_complex_regression,
                 Use_cea_lookuptable=Use_cea_lookuptable,
-                cea_lookup_pressure_range_psi=(0.0, TotalMaxExpectedChamberPressure_PSI)
+                cea_lookup_pressure_range_psi=(0.0, TotalMaxExpectedChamberPressure_PSI),Nozzle_expansion_ratio=NozzleMath.ExpansionRatio,helixstatus="add",amountofsmallcircles="add",sandgrainroughness="add"
             )
         
         if not complex_values_drive_motor:
@@ -1022,7 +1022,7 @@ if thrust_col and time_col:
         elif total_impulse < 325.12:
             designation = 'G'
         elif total_impulse < 650.24:
-            designation = 'H';
+            designation = 'H'
         elif total_impulse < 1300.48:
             designation = 'I'
         elif total_impulse < 2600.96:

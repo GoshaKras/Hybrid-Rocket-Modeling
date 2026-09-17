@@ -128,11 +128,16 @@ def activity_indicator(message: str, triangle_count: int | None = None):
 
 
 def regression_progress(distances: np.ndarray, label: str):
-    """Report completed samples, including time spent on the current sample."""
+    """Report progress every 25 completed samples and at the final sample."""
     started = time.monotonic()
     for index, regression in enumerate(distances, start=1):
-        with activity_indicator(f"{label}: sample {index}/{len(distances)} ({regression:.3f} mm)..."):
-            yield regression
+        yield regression
+        if index % 25 == 0 or index == len(distances):
+            print(
+                f"{label}: sample {index}/{len(distances)} ({regression:.3f} mm)... "
+                f"complete; {time.monotonic() - started:.1f}s elapsed.",
+                flush=True,
+            )
     print(f"{label}: finished in {time.monotonic() - started:.1f}s.", flush=True)
 
 
