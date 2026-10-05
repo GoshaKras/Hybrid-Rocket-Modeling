@@ -2,11 +2,12 @@ import pandas as pd
 import numpy as np
 import sys
 import re
+from pathlib import Path
 
 def get_input_vars_from_motormodel():
     """Dynamically extract input variable names from motormodel_copy2.py (lines 113-180) in order of appearance."""
     try:
-        with open('motormodel_copy2.py', 'r') as f:
+        with open(Path(__file__).resolve().parent / 'motormodel_copy2.py', 'r') as f:
             lines = f.readlines()
         
         # Extract lines 113-180 (the main input section)

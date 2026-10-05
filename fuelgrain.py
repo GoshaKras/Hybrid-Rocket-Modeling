@@ -1,5 +1,6 @@
 import time as time_module
 import json
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
@@ -43,6 +44,13 @@ class RegressionSlot:
     P_min_enclosing_diameter: float = 0.0
     P_largest_arm_contact: float = 0.0
     regratio: float = 0.0
+    cfratio: float = 1.0
+    blowingratio: float = 1.0
+    ratio_for_cf: float = 1.0
+    blowingnormal: float = float("nan")
+    blowinghelix: float = float("nan")
+    cfstraight: float = float("nan")
+    cfhelix: float = float("nan")
 
 
 class CEALookupTable:
@@ -287,12 +295,21 @@ class _ComplexRegressionStep:
 
 
 
-    def get_blowingandCF(self, flux,hydroD,viscosity,Chamberpressure,Local_OF,Nozzle_expansion_ratio,regression,fuelden):
+    def get_blowingandCF(self, flux,hydroD,viscosity,Chamberpressure,Local_OF,Nozzle_expansion_ratio,regression,fuelden,*,port_area):
         reynoldsnumber=(flux*hydroD)/viscosity
         skinFrictionstaright=0.074/(reynoldsnumber**0.2)
         surfacemassflux=regression*fuelden
-        streamvelocity=self.get_local_cea_state(Chamberpressure,Local_OF,Nozzle_expansion_ratio)[3]
-        chamberdensity=self.get_local_cea_state(Chamberpressure,Local_OF,Nozzle_expansion_ratio)[0]
+        # Use CEA chamber density (kg/m^3) and velocity (m/s).
+        chamberdensity=self.CEAforRocket.get_Chamber_Density(
+            Pc=Chamberpressure, MR=Local_OF
+        )*16.01846
+        chambermach=self.CEAforRocket.get_Chamber_MachNumber(
+            Pc=Chamberpressure, MR=Local_OF, fac_CR=port_area/self.throat_area
+        )
+        chambersonicvelocity=self.CEAforRocket.get_SonicVelocities(
+            Pc=Chamberpressure, MR=Local_OF, eps=Nozzle_expansion_ratio
+        )[0]
+        streamvelocity=chambermach*chambersonicvelocity*0.3048
         blowingnormal=surfacemassflux/(chamberdensity*streamvelocity*0.5*skinFrictionstaright)
         part_helixblow=surfacemassflux*streamvelocity
         part_helixwallshear=(chamberdensity*streamvelocity**2)/8
@@ -317,9 +334,13 @@ class _ComplexRegressionStep:
         fc=self.grain.calculate_fc(epsilon=sandgrainroughness/(hydroD/2),r0=hydroD/2,radius=CorrectionRC)
         helixwallshear=fc*part_helixwallshear
         blowinghelix=part_helixblow/helixwallshear
-        blowingratio=(blowingnormal/blowinghelix)*0.77
+        cfratio=CFhelix/cfstraight
+        with np.errstate(invalid="ignore"):
+            blowingratio=(blowingnormal/blowinghelix)**0.77
+        if np.isnan(blowingratio):
+            blowingratio=1.0
         regratio=(((CFhelix*blowingratio/cfstraight)-1)*ratio_forCF*ratio_forCF)+1
-        return regratio
+        return regratio, cfratio, blowingratio, ratio_forCF, blowingnormal, blowinghelix, cfstraight, CFhelix
     
         
         
@@ -330,11 +351,13 @@ class _ComplexRegressionStep:
 
     
 
-    def update_reg_slot_1(self, list,OFstartguess,chamber_pressure_psi,list_of_constants,startDiameter,current_time=0.0,verbose=True,use_helix,Nozzle_expansion_ratio,helixstatus,helix_P,helixloop,amountofsmallcircles,sandgrainroughness):
+    def update_reg_slot_1(self, list,OFstartguess,chamber_pressure_psi,list_of_constants,startDiameter,current_time=0.0,verbose=True,*,use_helix,Nozzle_expansion_ratio,helixstatus,helix_P,helixloop,amountofsmallcircles,sandgrainroughness,injector_help):
         last_regression=0.0
         end_regression=0.0
         lastmdotfuel=0.0
         for x in list:
+            # These diagnostics are unavailable when the helix calculation is skipped.
+            x.blowingnormal=x.blowinghelix=x.cfstraight=x.cfhelix=float("nan")
             iterate=True
             iteration_count=0
             oxflux=self.massflowox/x.area
@@ -346,11 +369,12 @@ class _ComplexRegressionStep:
                     viscosity=self.get_dynamic_viscosity(chamber_pressure_psi,OFstartguess,temp_values[1])
                     A_con=self.get_Acon_for_regression_slot(OFstartguess,chamber_pressure_psi,startDiameter,x.distance,list_of_constants,viscosity,temp_values[2])
                     localregression=(A_con/self.fuelden)*(1+2*(((x.totalflux*startDiameter)/viscosity)**-0.22)*(2.74**((x.distance*-0.4)/self.lengthinFG)))*((oxflux**(list_of_constants[5]+1))*(startDiameter**list_of_constants[5]))
+                    localregression=localregression*injector_help
                     end_regression=localregression
                     last_regression=localregression
                     mdotfuel=0.0
                     iterate=False
-                    #x.regratio=1
+                    x.regratio=1
                 else:
                     
                     mdotfuel=(self.fuelden*((last_regression + end_regression)/2)*x.peremeter*self.eachsectionlength)+lastmdotfuel
@@ -364,13 +388,19 @@ class _ComplexRegressionStep:
                     viscosity=self.get_dynamic_viscosity(chamber_pressure_psi,OF_local,temp_values[1])
                     A_con=self.get_Acon_for_regression_slot(OF_local,chamber_pressure_psi,startDiameter,x.distance,list_of_constants,viscosity,temp_values[2])
                     localregression=(A_con/self.fuelden)*(1+2*(((x.totalflux*startDiameter)/viscosity)**-0.22)*(2.74**((x.distance*-0.4)/self.lengthinFG)))*((oxflux**(list_of_constants[5]+1))*(startDiameter**list_of_constants[5]))
+                    localregression=localregression*injector_help
                     if use_helix==True:
-                        blowingnormal,skinFrictionstaright,part_helixblow,part_helixwallshear= self.get_blowingandCF(fuelflux,x.Diameter,viscosity,chamber_pressure_psi,OF_local,Nozzle_expansion_ratio,regression=last_regression, fuelden=self.fuelden)
-                        regratio=self.get_blowing_and_cf_helix(x.Diameter,whole_helixstatus=helixstatus,Start_hyD=startDiameter,HelixP_meters=helix_P,helixloopdiameter=helixloop,Area=x.area,P_max_inscribed_diameter=x.P_max_inscribed_diameter,P_min_enclosing_diameter=x.P_min_enclosing_diameter,AmountofSmallCircles=amountofsmallcircles,totalrgession=x.totalregression,cfstraight=skinFrictionstaright,sandgrainroughness=sandgrainroughness,part_helixblow=part_helixblow,part_helixwallshear=part_helixwallshear,perimeter=x.peremeter,P_largest_arm_contact=x.P_largest_arm_contact,blowingnormal=blowingnormal)
-                        if x.regratio<1:
+                        blowingnormal,skinFrictionstaright,part_helixblow,part_helixwallshear= self.get_blowingandCF(x.totalflux,x.Diameter,viscosity,chamber_pressure_psi,OF_local,Nozzle_expansion_ratio,regression=last_regression, fuelden=self.fuelden,port_area=x.area)
+                        regratio,x.cfratio,x.blowingratio,x.ratio_for_cf,x.blowingnormal,x.blowinghelix,x.cfstraight,x.cfhelix=self.get_blowing_and_cf_helix(x.Diameter,whole_helixstatus=helixstatus,Start_hyD=startDiameter,HelixP_meters=helix_P,helixloopdiameter=helixloop,Area=x.area,P_max_inscribed_diameter=x.P_max_inscribed_diameter,P_min_enclosing_diameter=x.P_min_enclosing_diameter,AmountofSmallCircles=amountofsmallcircles,totalrgession=x.totalregression,cfstraight=skinFrictionstaright,sandgrainroughness=sandgrainroughness,part_helixblow=part_helixblow,part_helixwallshear=part_helixwallshear,perimeter=x.peremeter,P_largest_arm_contact=x.P_largest_arm_contact,blowingnormal=blowingnormal)
+                        if regratio>1:
+                            x.regratio=regratio
+                        else:
                             x.regratio=1
                     else:
                         x.regratio=1
+                        x.cfratio=1.0
+                        x.blowingratio=1.0
+                        x.ratio_for_cf=1.0
                     localregression=localregression*x.regratio
                     amount_reg_difference=abs(1-(localregression/last_regression))
                     last_regression=localregression
@@ -391,7 +421,7 @@ class _ComplexRegressionStep:
         return list
 
 
-    def update_reg_slot_after_regression(self, list,OFstartguess,chamber_pressure_psi,list_of_constants,startDiameter,current_time=0.0,verbose=True,use_helix,Nozzle_expansion_ratio,helixstatus,helix_P,helixloop,amountofsmallcircles,sandgrainroughness):
+    def update_reg_slot_after_regression(self, list,OFstartguess,chamber_pressure_psi,list_of_constants,startDiameter,current_time=0.0,verbose=True,*,use_helix,Nozzle_expansion_ratio,helixstatus,helix_P,helixloop,amountofsmallcircles,sandgrainroughness,injector_help):
         """Second-and-later-step updater from hardregresstionattemp.py."""
         last_regression=0.0
         end_regression=0.0
@@ -401,6 +431,8 @@ class _ComplexRegressionStep:
         fuelflux=0.0
         OF_local=OFstartguess
         for x in list:
+            # These diagnostics are unavailable when the helix calculation is skipped.
+            x.blowingnormal=x.blowinghelix=x.cfstraight=x.cfhelix=float("nan")
             iterate=True
             iteration_count=0
             oxflux=self.massflowox/x.area
@@ -411,6 +443,8 @@ class _ComplexRegressionStep:
                 viscosity=self.get_dynamic_viscosity(chamber_pressure_psi,OF_local,temp_values[1])
                 A_con=self.get_Acon_for_regression_slot(OF_local,chamber_pressure_psi,startDiameter,x.distance,list_of_constants,viscosity,temp_values[2])
                 localregression=(A_con/self.fuelden)*(1+2*(((x.totalflux*startDiameter)/viscosity)**-0.22)*(2.74**((x.distance*-0.4)/self.lengthinFG)))*((oxflux**(list_of_constants[5]+1))*(startDiameter**list_of_constants[5]))
+                
+                localregression=localregression*injector_help
                 mdotfuel=0.0
                 lastmdotfuel=0.0
             else:
@@ -432,13 +466,19 @@ class _ComplexRegressionStep:
                 viscosity=self.get_dynamic_viscosity(chamber_pressure_psi,OF_local,temp_values[1])
                 A_con=self.get_Acon_for_regression_slot(OF_local,chamber_pressure_psi,startDiameter,x.distance,list_of_constants,viscosity,temp_values[2])
                 localregression=(A_con/self.fuelden)*(1+2*(((x.totalflux*startDiameter)/viscosity)**-0.22)*(2.74**((x.distance*-0.4)/self.lengthinFG)))*((oxflux**(list_of_constants[5]+1))*(startDiameter**list_of_constants[5]))
+                localregression=localregression*injector_help
                 if use_helix==True:
-                    blowingnormal,skinFrictionstaright,part_helixblow,part_helixwallshear= self.get_blowingandCF(fuelflux,x.Diameter,viscosity,chamber_pressure_psi,OF_local,Nozzle_expansion_ratio,regression=last_regression, fuelden=self.fuelden)
-                    regratio=self.get_blowing_and_cf_helix(x.Diameter,whole_helixstatus=helixstatus,Start_hyD=startDiameter,HelixP_meters=helix_P,helixloopdiameter=helixloop,Area=x.area,P_max_inscribed_diameter=x.P_max_inscribed_diameter,P_min_enclosing_diameter=x.P_min_enclosing_diameter,AmountofSmallCircles=amountofsmallcircles,totalrgession=x.totalregression,cfstraight=skinFrictionstaright,sandgrainroughness=sandgrainroughness,part_helixblow=part_helixblow,part_helixwallshear=part_helixwallshear,perimeter=x.peremeter,P_largest_arm_contact=x.P_largest_arm_contact,blowingnormal=blowingnormal)
-                    if x.regratio<1:
-                        x.regratio=1
+                    blowingnormal,skinFrictionstaright,part_helixblow,part_helixwallshear= self.get_blowingandCF(x.totalflux,x.Diameter,viscosity,chamber_pressure_psi,OF_local,Nozzle_expansion_ratio,regression=x.prev_regression, fuelden=self.fuelden,port_area=x.area)
+                    regratio,x.cfratio,x.blowingratio,x.ratio_for_cf,x.blowingnormal,x.blowinghelix,x.cfstraight,x.cfhelix=self.get_blowing_and_cf_helix(x.Diameter,whole_helixstatus=helixstatus,Start_hyD=startDiameter,HelixP_meters=helix_P,helixloopdiameter=helixloop,Area=x.area,P_max_inscribed_diameter=x.P_max_inscribed_diameter,P_min_enclosing_diameter=x.P_min_enclosing_diameter,AmountofSmallCircles=amountofsmallcircles,totalrgession=x.totalregression,cfstraight=skinFrictionstaright,sandgrainroughness=sandgrainroughness,part_helixblow=part_helixblow,part_helixwallshear=part_helixwallshear,perimeter=x.peremeter,P_largest_arm_contact=x.P_largest_arm_contact,blowingnormal=blowingnormal)
+                    if regratio>1:
+                        x.regratio=regratio
                     else:
                         x.regratio=1
+                else:
+                    x.regratio=1.0
+                    x.cfratio=1.0
+                    x.blowingratio=1.0
+                    x.ratio_for_cf=1.0
                 localregression=localregression*x.regratio
             x.prev_regression = localregression
             if verbose:
@@ -1189,7 +1229,9 @@ class FuelGrain():
                                 length_resolution=200, unit_scale_mm=None,
                                 graph_points=101, snapshot_regression_mm=None,
                                 snapshot_path=None, show_plane_preview=False,
-                                open_interactive_viewer=False):
+                                open_interactive_viewer=False, calibration_folder=None,
+                                rebuild_calibration=False,
+                                calibration_filename=None):
         """Build pixel-method geometry fits from the accurate 3-D voxel regression model.
 
         This replaces the 2-D ``FuelGrainRegressionSimulator`` dependency for
@@ -1205,6 +1247,97 @@ class FuelGrain():
         if in_plane_resolution < 20 or length_resolution < 2 or graph_points < 3:
             raise ValueError("in_plane_resolution >=20, length_resolution >=2, and graph_points >=3 are required")
         scale_to_mm = regression_3d.infer_unit_scale_to_mm(obj_path, unit_scale_mm)
+        coefficient_names = (
+            "area_coeffs", "perimeter_coeffs", "max_inscribed_coeffs",
+            "min_enclosing_coeffs", "circle_overlap_coeffs", "largest_arm_coeffs",
+            "surface_area_coeffs", "port_volume_coeffs",
+        )
+        cache_path = None
+        rebuild_reason = "saved calibration is disabled"
+        if calibration_folder is not None:
+            # Content hashes invalidate saved fits when geometry or calculation code changes.
+            metadata = {
+                "version": 1,
+                "obj_sha256": hashlib.sha256(obj_path.read_bytes()).hexdigest(),
+                "code_sha256": [hashlib.sha256(Path(module_file).read_bytes()).hexdigest()
+                                for module_file in (__file__, regression_3d.__file__, surfacearea.__file__)],
+                "axis": cross_section_axis,
+                "scale_to_mm": float(scale_to_mm),
+                "regression_rate": regression_rate, "time_seconds": time_seconds,
+                "in_plane_resolution": in_plane_resolution,
+                "length_resolution": length_resolution, "graph_points": graph_points,
+                "grain_length_m": self.fuel_grain_length_m,
+                "triangulated_surface": regression_3d.USE_TRIANGULATED_BORE_SURFACE_AREA,
+            }
+            metadata_json = json.dumps(metadata, sort_keys=True)
+            cache_key = hashlib.sha256(metadata_json.encode()).hexdigest()[:20]
+            calibration_root = Path(calibration_folder) / obj_path.stem
+            named_calibration = calibration_filename is not None
+            if named_calibration:
+                filename = Path(str(calibration_filename).strip())
+                if not filename.name or filename.name != str(filename):
+                    raise ValueError("calibration_filename must be a file name, not a path")
+                if filename.suffix.lower() != ".npz":
+                    filename = filename.with_suffix(".npz")
+                cache_path = calibration_root / filename
+            else:
+                cache_path = calibration_root / cache_key / "calibration.npz"
+
+            # A named calibration is an explicit user selection. Load it
+            # without invalidating it merely because source code changed.
+            if named_calibration and cache_path.is_file() and not rebuild_calibration:
+                try:
+                    with np.load(cache_path, allow_pickle=False) as saved:
+                        coefficients = {name: saved[name].copy() for name in coefficient_names}
+                        if any(value.ndim != 1 or not value.size or not np.all(np.isfinite(value))
+                               for value in coefficients.values()):
+                            raise ValueError("invalid saved coefficients")
+                        initial_area = float(saved["initial_surface_area"])
+                    for name, value in coefficients.items():
+                        setattr(self, name, value)
+                    self._previous_pixel_port_volume_m3 = None
+                    self._store_initial_surface_area(initial_area)
+                    print(f"[Fuel grain] Source: SAVED FILE for {obj_path.name}")
+                    print(f"[Fuel grain] Loaded by name: {cache_path.resolve()}")
+                    print("Skipping pixel-method recalculation, plots, and plane picker.")
+                    return
+                except (OSError, ValueError, KeyError, EOFError) as exc:
+                    rebuild_reason = f"named calibration could not be read: {exc}"
+
+            if rebuild_calibration:
+                rebuild_reason = "RUN_NEW_PIXEL_CALIBRATION is True"
+            elif named_calibration and not cache_path.is_file():
+                rebuild_reason = f"named calibration does not exist: {cache_path.resolve()}"
+            elif snapshot_regression_mm is not None:
+                rebuild_reason = "a regressed OBJ snapshot was requested"
+            else:
+                rebuild_reason = "no saved calibration matches this OBJ, calculation settings, and code"
+            if (not named_calibration and cache_path.is_file()
+                    and not rebuild_calibration and snapshot_regression_mm is None):
+                try:
+                    with np.load(cache_path, allow_pickle=False) as saved:
+                        if str(saved["metadata"]) != metadata_json:
+                            raise ValueError("calibration settings do not match")
+                        coefficients = {name: saved[name].copy() for name in coefficient_names}
+                        if any(value.ndim != 1 or not value.size or not np.all(np.isfinite(value))
+                               for value in coefficients.values()):
+                            raise ValueError("invalid saved coefficients")
+                        initial_area = float(saved["initial_surface_area"])
+                    for name, value in coefficients.items():
+                        setattr(self, name, value)
+                    self._previous_pixel_port_volume_m3 = None
+                    self._store_initial_surface_area(initial_area)
+                    print(f"[Fuel grain] Source: SAVED FILE for {obj_path.name}")
+                    print(f"[Fuel grain] Loaded: {cache_path.resolve()}")
+                    print("Using saved geometry fits; skipping regression plots and plane picker.")
+                    print("[Fuel grain] Fits stay fixed during the run; geometry values are evaluated as regression advances.")
+                    return
+                except (OSError, ValueError, KeyError, EOFError) as exc:
+                    rebuild_reason = f"saved calibration could not be read: {exc}"
+        print(f"[Fuel grain] Source: NEW CALIBRATION from {obj_path.name}")
+        print(f"[Fuel grain] Reason: {rebuild_reason}")
+        if cache_path is not None:
+            print(f"[Fuel grain] Will save to: {cache_path.resolve()}")
         mesh = regression_3d.load_mesh(obj_path, scale_to_mm)
         if show_plots and show_plane_preview:
             cross_section_axis = regression_3d.preview_high_resolution_plane(
@@ -1287,6 +1420,22 @@ class FuelGrain():
         self.port_volume_coeffs = fit_metric(whole_grain_fit_rows, "port_volume_mm3")
         self._previous_pixel_port_volume_m3=None
         self._store_initial_surface_area(float(surface_rows[0]["burning_surface_area_mm2"]) / 1_000_000.0)
+        if cache_path is not None:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(plane_rows).to_csv(cache_path.parent / "plane_data.csv", index=False)
+            pd.DataFrame(surface_rows).to_csv(cache_path.parent / "whole_grain_data.csv", index=False)
+            (cache_path.parent / "settings.json").write_text(
+                json.dumps({**metadata, "selected_axis": cross_section_axis,
+                            "polynomial_degrees": selected_fit_degrees}, indent=2), encoding="utf-8")
+            temporary_path = cache_path.with_suffix(".tmp.npz")
+            np.savez_compressed(
+                temporary_path, metadata=metadata_json,
+                initial_surface_area=self.initial_surface_area,
+                **{name: getattr(self, name) for name in coefficient_names},
+            )
+            temporary_path.replace(cache_path)
+            print(f"[Fuel grain] Calibration saved: {cache_path.resolve()}")
+        print("[Fuel grain] Fits stay fixed during the run; geometry values are evaluated as regression advances.")
 
         print("3-D regression geometry loaded into FuelGrain:")
         print(f"  plane: {('X', 'Y', 'Z')[cross_section_axis]}; grid: {tuple(solid.shape)}")
@@ -1421,11 +1570,11 @@ class FuelGrain():
             self.ratio_forCF=(self.P_perimeter-AmountofSmallCircles*self.P_largest_arm_contact)/self.P_perimeter
             if self.time==Timestep:
                 self.starttrianglevalue=self.triangehelicallength
-        if Is_FuelGrain_GoshaStar==True:
+        if Is_FuelGrain_GoshaStar==True and self.Is_pixel==False:
             self.helixloopdiameter=self.bigcircleraduis*2+OusideSmallCircle_raduis
             self.helixNominalarea_star=((self.testArea-((self.bigcircleraduis)**2*3.14))/(AmountofSmallCircles*0.5))
             self.helixNominalDiameter=np.sqrt(self.helixNominalarea_star/3.14)*2
-        else:
+        elif self.Is_pixel==False:
             self.helixloopdiameter+= self.regression_M_persec_withratio*Timestep*2
             self.helixNominalDiameter+= self.regression_M_persec_withratio*Timestep*2 # work this out later
         if self.Is_pixel==True:
@@ -1645,6 +1794,7 @@ class FuelGrain():
                           amount_of_slots, timestep, OFstartguess, mdotox,
                           Do_complex_regression=False,
                           Print_complex_regression=False,
+                          Export_complex_regression_ratios=False,
                           Use_cea_lookuptable=False,
                           cea_lookup_filename="cea_complex_regression.npz",
                           cea_lookup_pressure_range_psi=(0.0, 1500.0),
@@ -1652,7 +1802,7 @@ class FuelGrain():
                           cea_lookup_pressure_points=31,
                           cea_lookup_of_points=61,
                           usecomplexregression=False,
-                          use_pixel_geometry=None,Nozzle_expansion_ratio,helixstatus,amountofsmallcircles,sandgrainroughness):
+                          use_pixel_geometry=None,*,Nozzle_expansion_ratio,helixstatus,amountofsmallcircles,sandgrainroughness,throat_area,injector_help):
         """Advance complex regression with a fresh helper context per timestep.
 
         Helpers live on _ComplexRegressionStep; the original calculation order,
@@ -1662,6 +1812,7 @@ class FuelGrain():
             return []
 
         step = _ComplexRegressionStep(self, CEAforRocket, timestep)
+        step.throat_area=throat_area
         step.amount_of_sections=amount_of_slots-1
         # ``totalregression`` is the radial change from the initial local
         # diameter, so both quantities must start at zero deformation.
@@ -1740,10 +1891,10 @@ class FuelGrain():
                 print("Complex regression: using pixel area/perimeter equations for every slot.")
             else:
                 print("Complex regression: using built-in circular area/perimeter equations for every slot.")
-            self.regression_slots=step.update_reg_slot_1(self.regression_slots,OFstartguess,step.chamber_pressure_psi,list_of_constants,portD,current_time=self.time,verbose=False,use_helix=self.Is_helix,Nozzle_expansion_ratio=Nozzle_expansion_ratio,helixstatus=helixstatus,helix_P=self.HelixP_meters,helixloop=self.helixloopdiameter,amountofsmallcircles=amountofsmallcircles,sandgrainroughness=sandgrainroughness)
+            self.regression_slots=step.update_reg_slot_1(self.regression_slots,OFstartguess,step.chamber_pressure_psi,list_of_constants,portD,current_time=self.time,verbose=False,use_helix=self.Is_helix,Nozzle_expansion_ratio=Nozzle_expansion_ratio,helixstatus=helixstatus,helix_P=self.HelixP_meters,helixloop=self.helixloopdiameter,amountofsmallcircles=amountofsmallcircles,sandgrainroughness=sandgrainroughness,injector_help=injector_help)
         else:
             step.update_mdot_from_previous_profile(self.regression_slots)
-            self.regression_slots=step.update_reg_slot_after_regression(self.regression_slots,OFstartguess,step.chamber_pressure_psi,list_of_constants,portD,current_time=self.time,verbose=False)
+            self.regression_slots=step.update_reg_slot_after_regression(self.regression_slots,OFstartguess,step.chamber_pressure_psi,list_of_constants,portD,current_time=self.time,verbose=False,use_helix=self.Is_helix,Nozzle_expansion_ratio=Nozzle_expansion_ratio,helixstatus=helixstatus,helix_P=self.HelixP_meters,helixloop=self.helixloopdiameter,amountofsmallcircles=amountofsmallcircles,sandgrainroughness=sandgrainroughness,injector_help=injector_help)
 
         mdot_fullgrain=self.regression_slots[-1].mdotfuel if self.regression_slots else 0.0
         self.complex_total_fuel_mass_kg+=mdot_fullgrain*timestep
@@ -1797,26 +1948,44 @@ class FuelGrain():
             self.insurfacearea=mean_port_perimeter*FuelGrainLength*self.effectivelengthconstant
             self.volume_grain=mean_port_area*FuelGrainLength
 
-        if Print_complex_regression:
-            for index, slot in enumerate(self.regression_slots):
-                self.complex_regression_history.append({
-                    "time_s": self.time,
-                    "slot_index": index,
-                    "distance_m": slot.distance,
-                    "area_m2": slot.area,
-                    "diameter_m": slot.Diameter,
-                    "perimeter_m": slot.peremeter,
-                    "regression_m_per_s": slot.prev_regression,
-                    "average_regression_m_per_s": average_regression_m_per_s,
-                    "total_regression_m": slot.totalregression,
-                    "total_flux_kg_m2_s": slot.totalflux,
-                    "fuel_flux_kg_m2_s": slot.fuelflux,
-                    "OF": slot.OF,
-                    "mdotfuel_kg_s": slot.mdotfuel,
-                    "mdot_from_fit": getattr(slot, "mdot_from_fit", 0.0),
-                    "mdot_fullgrain": mdot_fullgrain,
-                    "total_fuel_mass_kg": self.complex_total_fuel_mass_kg,
+        # Record every slot for CSV export regardless of whether verbose
+        # terminal output is enabled.  Printing is only a display preference.
+        for index, slot in enumerate(self.regression_slots):
+            if Print_complex_regression:
+                print(f"Complex regression: time={self.time:g} s, slot={index}, "
+                      f"distance={slot.distance:g} m, regratio={slot.regratio:g}, "
+                      f"blowingnormal={slot.blowingnormal:g}, blowinghelix={slot.blowinghelix:g}, "
+                      f"cfstraight={slot.cfstraight:g}, cfhelix={slot.cfhelix:g}")
+            history_row={
+                "time_s": self.time,
+                "slot_index": index,
+                "distance_m": slot.distance,
+                "area_m2": slot.area,
+                "diameter_m": slot.Diameter,
+                "perimeter_m": slot.peremeter,
+                "regression_m_per_s": slot.prev_regression,
+                "regratio": slot.regratio,
+                "average_regression_m_per_s": average_regression_m_per_s,
+                "total_regression_m": slot.totalregression,
+                "total_flux_kg_m2_s": slot.totalflux,
+                "fuel_flux_kg_m2_s": slot.fuelflux,
+                "OF": slot.OF,
+                "mdotfuel_kg_s": slot.mdotfuel,
+                "mdot_from_fit": getattr(slot, "mdot_from_fit", 0.0),
+                "mdot_fullgrain": mdot_fullgrain,
+                "total_fuel_mass_kg": self.complex_total_fuel_mass_kg,
+            }
+            if Export_complex_regression_ratios:
+                history_row.update({
+                    "cfratio": slot.cfratio,
+                    "blowing_ratio": slot.blowingratio,
+                    "ratio_for_cf": slot.ratio_for_cf,
+                    "blowingnormal": slot.blowingnormal,
+                    "blowinghelix": slot.blowinghelix,
+                    "cfstraight": slot.cfstraight,
+                    "cfhelix": slot.cfhelix,
                 })
+            self.complex_regression_history.append(history_row)
         return self.regression_slots
 
     

@@ -1,5 +1,6 @@
 #Imports
 import time as time_module
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -101,10 +102,13 @@ if len(sys.argv) >= 3:
 # Start timing
 script_start_time = time_module.time()
 
-#shit for output csv
-Output="output_thrust.csv"
+# Keep generated CSVs beside this script regardless of the terminal's
+# current working directory.
+MODEL_FOLDER = Path(__file__).resolve().parent
+Output = MODEL_FOLDER / "output_thrust.csv"
+COMPLEX_REGRESSION_OUTPUT = MODEL_FOLDER / "complex_regression.csv"
 #input files
-inputcdcsv="cd.csv"
+inputcdcsv = Path(__file__).resolve().parent / "cd.csv"
 df_cdinput=pd.read_csv(inputcdcsv)
 #General Inputs
 ShowPlots = True  # default: controls pixel-method plotting; may be overridden by vertical inputs
@@ -114,6 +118,12 @@ PlotAreaUnit = None
 # 3-D fuel-grain regression defaults. These remain available when vertical
 # inputs are enabled; add matching fields to the vertical CSV to override them.
 OBJ_FILE = "hypertek stuff.obj"            # OBJ fuel-grain file in this folder
+FUEL_GRAIN_CALIBRATION_FOLDER = Path(__file__).resolve().parent / "fuelgraincalibration"
+# Choose the saved calibration file by name. ".npz" is added if omitted.
+FUEL_GRAIN_CALIBRATION_NAME = "hypertek_stuff_baseline.npz"
+# True: run the full pixel calibration and save a new file.
+# False: load the named file; if it does not exist, calculate and save it.
+RUN_NEW_PIXEL_CALIBRATION = False
 # The named plane is high resolution; its normal is the lower-resolution
 # length direction. Example: "X" means a detailed Y-Z slice.
 HIGH_RESOLUTION_PLANE = "Y"            # "X", "Y", or "Z"
@@ -152,13 +162,15 @@ ShowPlots = True  # default: controls pixel-method plotting; may be overridden b
 # controls, so keep that path disabled unless the flags are added explicitly.
 Do_complex_regression = False
 Print_complex_regression = False
+# True adds cfratio, blowing_ratio, and ratio_for_cf columns to complex_regression.csv.
+Export_complex_regression_ratios = True
 Use_cea_lookuptable = True
 # Used only when Use_cea_lookuptable is True.  Vertical inputs may override it.
 TotalMaxExpectedChamberPressure_PSI = 1500.0
 
 if USE_VERTICAL_INPUTS:
     import inputs_io
-    inputs_io.import_inputs_vertical(VERTICAL_INPUTS_FILE, globals())
+    inputs_io.import_inputs_vertical(Path(__file__).resolve().parent / VERTICAL_INPUTS_FILE, globals())
     CEAforRocket = CEA_Obj(oxName=WhatOxidizer, fuelName=WhatFuel)
     print(f"Loaded inputs from {VERTICAL_INPUTS_FILE}")
 else:
@@ -276,7 +288,7 @@ else:
 
         max_at_what_pressure_psi= 400 #psi
         max_at_what_OF_ratio= 6.3
-        regfluxstuff= 10
+        regfluxstuff= 1
         Is_fizz_when_equal=False
         preccandpostvolume=0.00616
         Fizzstart2=1
@@ -322,7 +334,8 @@ if True:
     Usepixel_calcs_SAV=True
     burntimecutoff=10
     Do_complex_regression=True
-    Print_complex_regression=True
+    Print_complex_regression=False
+    Export_complex_regression_ratios = True
     Use_cea_lookuptable=True
     TotalMaxExpectedChamberPressure_PSI=1000.0
     Max_expected_pressure_psi=500
@@ -351,7 +364,7 @@ if True:
     #stuff to add to csv
     #max_at_what_pressure_psi= 400 #psi
     #max_at_what_OF_ratio= 6.3
-    #regfluxstuff= 10
+    #regfluxstuff= 1
     #Is_fizz_when_equal=False
     #preccandpostvolume=0.00616
     #Fizzstart2=1
@@ -653,6 +666,7 @@ if Exportinputs==True:
     
 
 OxtankMath=Oxtank(RealTime,Oxtanktemp,NitrousQuality,StartMass_Gas,StartMass_Liquid,StartMass_TotalOx,Timestep,MetalOxtanktemp,volumetank=OxtankVolume)
+two_phase_diagnostic_state = CP.AbstractState('HEOS', 'NitrousOxide')
 OxtankMath.StuffNoPrint(OxtankVolume, Timestep, oxtankLstart,hydroD=HydrolicDiameter,isventopen=isventopen)
 
 
@@ -701,7 +715,8 @@ if Is_sim_flight==True: #fix later
 
 # Pixel-method analysis and viewer are independent of flight simulation.
 if Is_FuelGrain_PixelMethod==True:
-    print(f"Fuel-grain regression plots {'will show' if ShowPlots else 'will not show'}.")
+    print(f"[Fuel grain] Checking saved calibration for {OBJ_FILE}...")
+    print(f"If recalibration is needed, regression plots {'will show' if ShowPlots else 'will not show'}.")
     print(f"  Plane picker: {'on' if ShowPlots and SHOW_PLANE_PREVIEW else 'off'}; "
           f"slider viewer: {'on' if ShowPlots and OPEN_INTERACTIVE_VIEWER else 'off'}.")
     # Run full regression analysis with all graphs (controlled by ShowPlots)
@@ -721,7 +736,7 @@ if Is_FuelGrain_PixelMethod==True:
     if plane_name not in ("X", "Y", "Z"):
         raise ValueError("HIGH_RESOLUTION_PLANE must be X, Y, or Z")
     FuelGrainMath.run_regression_analysis(
-        OBJ_FILE,
+        Path(__file__).resolve().parent / OBJ_FILE,
         regression_rate=REGRESSION_RATE_MM_PER_S,
         time_seconds=SIMULATION_TIME_S,
         cross_section_axis=("X", "Y", "Z").index(plane_name),
@@ -736,6 +751,9 @@ if Is_FuelGrain_PixelMethod==True:
         snapshot_path=f"{OUTPUT_FOLDER}/{REGRESSED_SNAPSHOT_FILENAME}",
         show_plane_preview=SHOW_PLANE_PREVIEW,
         open_interactive_viewer=OPEN_INTERACTIVE_VIEWER,
+        calibration_folder=FUEL_GRAIN_CALIBRATION_FOLDER,
+        rebuild_calibration=RUN_NEW_PIXEL_CALIBRATION,
+        calibration_filename=FUEL_GRAIN_CALIBRATION_NAME,
     )
 
 
@@ -793,6 +811,10 @@ try:
         OxtankMath.NitrousQuality_func()
         OxtankMath.intailvapour()
         OxtankMath.twophaseflow_genstuff(FuelGrainMath.chamberpressure_PA,DischargeCo_SPI,InjectorArea,DischargeCo_HEM)
+        # Comparison values for the tank CSV only; the motor uses the original flow.
+        OxtankMath.twophaseflow_try2(
+            FuelGrainMath.chamberpressure_PA, DischargeCo_SPI, InjectorArea,
+            DischargeCo_HEM, two_phase_diagnostic_state)
         if Is_vapourPhase_constant_temp==True and OxtankMath.status=="Vapour":
             OxtankMath.Vapourphase_constant_temp()
         else:
@@ -821,8 +843,15 @@ try:
                 use_pixel_geometry=Complex_regression_use_pixel_geometry,
                 Do_complex_regression=Do_complex_regression,
                 Print_complex_regression=Print_complex_regression,
+                Export_complex_regression_ratios=Export_complex_regression_ratios,
                 Use_cea_lookuptable=Use_cea_lookuptable,
-                cea_lookup_pressure_range_psi=(0.0, TotalMaxExpectedChamberPressure_PSI),Nozzle_expansion_ratio=NozzleMath.ExpansionRatio,helixstatus="add",amountofsmallcircles="add",sandgrainroughness="add"
+                cea_lookup_pressure_range_psi=(0.0, TotalMaxExpectedChamberPressure_PSI),
+                Nozzle_expansion_ratio=NozzleMath.ExpansionRatio,
+                throat_area=NozzleMath.throatarea,
+                helixstatus=Whole_thing_helix,
+                amountofsmallcircles=AmountofSmallCircles,
+                sandgrainroughness=HELIX_FC_EPSILON,
+                injector_help=HowmuchInj_Help
             )
         
         if not complex_values_drive_motor:
@@ -834,13 +863,14 @@ try:
         FuelGrainMath.gammas(CEAforRocket,expansionratio=NozzleMath.ExpansionRatio)
         FuelGrainMath.throatPressure(CEAforRocket)
         FuelGrainMath.densitys(CEAforRocket)
-        if Is_fuelGrain_Helix==True:
-            if Whole_thing_helix==True:
-                FuelGrainMath.Whole_thing_helix(CEAforRocket,NozzleMath.ExpansionRatio,NozzleMath.throatarea,Is_FuelGrain_GoshaStar=Is_FuelGrain_GoshaStar,timestep=Timestep,revPitch=revPitch,PitchFor_Helix=PitchFor_Helix)
-            else:
-                FuelGrainMath.helixmath(CEAforRocket,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix,revPitch,PitchFor_Helix,AmountofSmallCircles,Is_FuelGrain_PixelMethod,FuelGrainDiameter,expansionratio=NozzleMath.ExpansionRatio,OusideSmallCircle_raduis=OutsideSmallCircle_raduis,helical_archsegment=helicalarchsegmant,thoart_area=NozzleMath.throatarea,fuelgrainlength=FuelGrainLength,mw_ox=mw_ox,Fuel_Density=Fuel_Density,oxden=OxtankMath.Den_Total,sandgrainroughness=HELIX_FC_EPSILON)
-        if Is_FuelGrain_GoshaStar==True:
-            FuelGrainMath.complex_area_func(FuelGrainLength,Timestep,Is_fuelGrain_Helix,Is_FuelGrain_GoshaStar,AmountofSmallCircles,Fuel_Density=Fuel_Density)
+        if not complex_values_drive_motor:
+            if Is_fuelGrain_Helix==True:
+                if Whole_thing_helix==True:
+                    FuelGrainMath.Whole_thing_helix(CEAforRocket,NozzleMath.ExpansionRatio,NozzleMath.throatarea,Is_FuelGrain_GoshaStar=Is_FuelGrain_GoshaStar,timestep=Timestep,revPitch=revPitch,PitchFor_Helix=PitchFor_Helix)
+                else:
+                    FuelGrainMath.helixmath(CEAforRocket,Timestep,Is_FuelGrain_GoshaStar,Is_fuelGrain_Helix,revPitch,PitchFor_Helix,AmountofSmallCircles,Is_FuelGrain_PixelMethod,FuelGrainDiameter,expansionratio=NozzleMath.ExpansionRatio,OusideSmallCircle_raduis=OutsideSmallCircle_raduis,helical_archsegment=helicalarchsegmant,thoart_area=NozzleMath.throatarea,fuelgrainlength=FuelGrainLength,mw_ox=mw_ox,Fuel_Density=Fuel_Density,oxden=OxtankMath.Den_Total,sandgrainroughness=HELIX_FC_EPSILON)
+            if Is_FuelGrain_GoshaStar==True:
+                FuelGrainMath.complex_area_func(FuelGrainLength,Timestep,Is_fuelGrain_Helix,Is_FuelGrain_GoshaStar,AmountofSmallCircles,Fuel_Density=Fuel_Density)
         if Is_fuelgrain_Transient==True:
             FuelGrainMath.transeint_chamber_model(NozzleCD_ForChamberPressure,Ncomb_ForChamberPressure,NozzleMath,Fuel_Density,Timestep,Is_fuelgrain_Transient,ambientpressure_pa=flighmath.pressure_pa if Is_sim_flight else PressureOutsidePa)
         NozzleMath.CEA_Values(FuelGrainMath.chamberpressure_PSI,FuelGrainMath.OF,CEAforRocket)
@@ -904,8 +934,8 @@ else:
     
 combined_csv.to_csv(Output, index=False)
 
-if Do_complex_regression and Print_complex_regression:
-    FuelGrainMath.export_complex_regression_csv("complex_regression.csv")
+if Do_complex_regression:
+    FuelGrainMath.export_complex_regression_csv(COMPLEX_REGRESSION_OUTPUT)
 
 # Stop profiling and print results
 profiler.disable()

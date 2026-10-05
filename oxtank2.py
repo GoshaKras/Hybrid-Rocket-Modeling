@@ -9,6 +9,7 @@ import rocketcea as rcea
 from CoolProp.CoolProp import PropsSI
 from rocketcea.cea_obj import CEA_Obj
 import CoolProp.CoolProp as CP
+from CoolProp.CoolProp import AbstractState
 import sys
 import inputs_io
 from rocketcea.cea_obj import CEA_Obj, add_new_fuel, add_new_oxidizer, add_new_propellant
@@ -147,6 +148,16 @@ class Oxtank():
         self.specinternalenthapy_h_vap=PropsSI('H', 'T', self.t_Oxtanktemp, 'Q', 1, 'NitrousOxide')
         self.gas_spec_entropy=0
         self.startentropyspec=0
+        # Second two-phase model (cusser.py); included in the CSV output.
+        self.dPdT_rho = self.dDdT_P = self.cp = self.cv = None
+        self.dVdT_P = self.R_star = self.molar_mass = None
+        self.dZdT_P = self.dZdT_rho = self.gamma = self.z = self.n = None
+        self.compressbility_factor = self.mdotspc = None
+        self.choked_mdot_spc = self.critcal_press = self.mdots_r_diff = None
+        self.x_downstream = self.enthalpy_downstream = None
+        self.density_downstream = self.hemc = None
+        self.slip_vel = self.void_frac = self.mdot_fml = None
+        self.mdot_2phase_try2 = None
         
         #csv stuff
         self._init_attrs = list(self.__dict__.keys())
@@ -267,8 +278,11 @@ class Oxtank():
                 self.RealMassFlowRate=self.mdotfalala_vap
         else:
             self.RealMassFlowRate=self.MassFlowrateSpi
+            
         if Is_2phase_flow_injector_model==False:
             self.RealMassFlowRate=self.mdotDryer
+        if self.time>Timestep:
+            self.RealMassFlowRate=self.mdot_2phase_try2
     
         self.MdotOxpertick= self.RealMassFlowRate*Timestep
         self.liquidmassflowrate= self.RealMassFlowRate*Timestep*(1-self.NitrousQuality)
@@ -706,6 +720,8 @@ class Oxtank():
             self.densitydownstream=PropsSI('D', 'Q', self.x_forOrfice_thermogenic, 'P', chamberpressure_PA, 'NitrousOxide')
             self.densitydownstream_vap=PropsSI('D', 'P', chamberpressure_PA, 'Q',1, 'NitrousOxide')
             self.densitydownstream_liquid=PropsSI('D', 'P', chamberpressure_PA, 'Q',0, 'NitrousOxide')
+            self.density_downstream=1/(self.x_forOrfice_thermogenic/self.densitydownstream_vap+(1-self.x_forOrfice_thermogenic)/self.densitydownstream_liquid)
+            #self.density_downstream=PropsSI('D', 'P', chamberpressure_PA, 'H', self.downstream_enthalpy, 'NitrousOxide')
             self.densitydownstream2=self.x_forOrfice_thermogenic*self.densitydownstream_vap+(1-self.x_forOrfice_thermogenic)*self.densitydownstream_liquid
             self.mdot_hem_try2=self.densitydownstream2*InjectorArea*DischargeCo_HEM*np.sqrt(2*self.delta_enthalpy)
             #self.mdot_hem_try3=self.densitydownstream2*InjectorArea*DischargeCo_HEM*np.sqrt(2*self.delta_enthalpy2)
@@ -725,7 +741,11 @@ class Oxtank():
             q5=1+(((self.gammanitrous-1)/2)*q3)  
             q6=q5**(-((self.gammanitrous+1)/(2*(self.gammanitrous-1))))
             self.trymdot=q1*q2*q4*q6
-            
+
+            #try 2 for 2 phase
+
+
+
             # Compressibility factor Z
             #try:
                # R_specific = 8.314462618 / CP.PropsSI('M', 'NitrousOxide')
@@ -734,6 +754,88 @@ class Oxtank():
             #except:
              #   self.Z_factor_calc = 0.0
     
+    def twophaseflow_try2(self, chamberpressure_PA, DischargeCo_SPI,
+                         InjectorArea, DischargeCo_HEM, HEOS):
+        """Port of cusser.two_phase_schenanagans; separate comparison outputs.
+
+        Preserve the reference HEM density blend and sqrt(delta h) convention.
+        These results do not replace the original injector model outputs.
+        """
+        liquid = self.status != "Vapour"
+        rho = self.Den_Liquid if liquid else self.Den_Gas
+        t = self.Oxtanktemp
+        p = self.Vapour_PressurePa
+        # Reset diagnostics before calculating the current phase.
+        self.x_downstream = self.enthalpy_downstream = None
+        self.density_downstream = self.hemc = None
+        self.slip_vel = self.void_frac = self.mdot_fml = None
+        HEOS.specify_phase(CP.iphase_liquid if liquid else CP.iphase_gas)
+        try:
+            HEOS.update(CP.DmassT_INPUTS, rho, t)
+            self.dPdT_rho = HEOS.first_partial_deriv(CP.iP, CP.iT, CP.iDmass)
+            HEOS.update(CP.PT_INPUTS, p, t)
+            self.dDdT_P = HEOS.first_partial_deriv(CP.iDmass, CP.iT, CP.iP)
+            self.cp = HEOS.keyed_output(CP.iCpmass)
+            self.cv = HEOS.keyed_output(CP.iCvmass)
+            self.molar_mass = HEOS.molar_mass()
+            self.z = HEOS.keyed_output(CP.iZ)
+            if not liquid:
+                upstream_s = HEOS.keyed_output(CP.iSmass)
+        finally:
+            HEOS.unspecify_phase()
+        self.R_star = 8.31446261815324 / self.molar_mass
+        self.dVdT_P = -self.dDdT_P / rho**2
+        self.dZdT_P = p / self.R_star * (self.dVdT_P / t - 1 / (rho*t**2))
+        self.dZdT_rho = (self.dPdT_rho / t - p / t**2) / (rho*self.R_star)
+        self.gamma = self.cp / self.cv
+        self.n = self.gamma * ((self.z + t*self.dZdT_rho) /
+                               (self.z + t*self.dZdT_P))
+        n = self.n
+        dp = p - chamberpressure_PA
+        self.choked_mdot_spc = DischargeCo_SPI * InjectorArea * np.sqrt(
+            n*rho*p * (2 / (n+1)**(n/(n-1))))
+        self.critcal_press = chamberpressure_PA / (2/(n+1))**(n/(n-1))
+        if dp <= 0:
+            self.compressbility_factor = self.mdotspc = 0.0
+            self.mdots_r_diff = self.mdot_2phase_try2 = 0.0
+            if liquid:
+                self.hemc = self.mdot_fml = 0.0
+            return
+        pressure_ratio = chamberpressure_PA / p
+        self.compressbility_factor = np.sqrt(
+            p/(2*dp) * (2*n/(n-1)) * pressure_ratio**(2/n)
+            * (1-pressure_ratio**((n-1)/n)))
+        self.mdotspc = (DischargeCo_SPI * InjectorArea *
+                        self.compressbility_factor * np.sqrt(2*rho*dp))
+        spi = DischargeCo_SPI * InjectorArea * np.sqrt(2*rho*dp)
+        mean_flow = (spi + self.mdotspc) / 2
+        self.mdots_r_diff = (spi-self.mdotspc)/mean_flow*100 if mean_flow else 0.0
+        if self.mdotspc > self.choked_mdot_spc:
+            self.mdotspc = self.choked_mdot_spc
+        self.mdot_2phase_try2 = self.mdotspc
+        if liquid:
+            upstream_s = PropsSI('S', 'T', t, 'Q', self.NitrousQuality, 'NitrousOxide')
+        # Isentropic downstream quality for both liquid and vapour upstream states.
+        s_liq = PropsSI('S', 'P', chamberpressure_PA, 'Q', 0, 'NitrousOxide')
+        s_vap = PropsSI('S', 'P', chamberpressure_PA, 'Q', 1, 'NitrousOxide')
+        self.x_downstream = float(np.clip((upstream_s-s_liq)/(s_vap-s_liq), 0, 1))
+        if liquid:
+            upstream_h = PropsSI('H', 'T', t, 'Q', self.NitrousQuality, 'NitrousOxide')
+            x = self.x_downstream
+            h_liq = PropsSI('H', 'P', chamberpressure_PA, 'Q', 0, 'NitrousOxide')
+            h_vap = PropsSI('H', 'P', chamberpressure_PA, 'Q', 1, 'NitrousOxide')
+            self.enthalpy_downstream = x*h_vap + (1-x)*h_liq
+            rho_liq = PropsSI('D', 'P', chamberpressure_PA, 'Q', 0, 'NitrousOxide')
+            rho_vap = PropsSI('D', 'P', chamberpressure_PA, 'Q', 1, 'NitrousOxide')
+            self.density_downstream = 1/(x/rho_vap+(1-x)/rho_liq)
+            self.hemc = (DischargeCo_HEM * InjectorArea * self.density_downstream
+                         * np.sqrt(2 * max(upstream_h-self.enthalpy_downstream, 0.0)))
+            self.slip_vel = (rho_liq/rho_vap)**(1/3)
+            # Equivalent to cusser's expression, including at quality zero.
+            self.void_frac = x / (x + (1-x)*self.slip_vel*rho_vap/rho_liq)
+            self.mdot_fml = (1-self.void_frac)*self.mdotspc + self.void_frac*self.hemc
+            self.mdot_2phase_try2 = self.mdot_fml
+
     def printshit(self):
             print("hello")
     def Calc_CD(self,chamberpressure_PA):
